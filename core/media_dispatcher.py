@@ -1,7 +1,7 @@
 # core/media_dispatcher.py
 """Central dispatcher for incoming media files from any interface.
 
-Interfaces (Discord, Matrix, WebUI …) receive media files from
+Interfaces (Matrix, WebUI …) receive media files from
 their respective protocols.  **They must not attempt to understand the media
 themselves** — they hand the file off here and receive a plain string that
 they can enqueue into the message chain.

@@ -25,9 +25,7 @@ class TestDefaults:
         assert it.is_user_facing("nobody/1") is False  # the Core has never heard of it
 
     def test_core_interfaces_keep_their_old_behaviour(self) -> None:
-        assert it.is_user_facing("discord_bot/1/2") and it.is_voice_input_tts_only(
-            "discord_bot"
-        )
+        assert it.is_user_facing("synth_webui/x")
         assert it.message_action_for("synth_webui/x") == "message_synth_webui"
 
     def test_empty_values_are_safe(self) -> None:
@@ -52,10 +50,8 @@ class TestDeclared:
         )
 
     def test_a_declaration_overrides_a_core_default(self) -> None:
-        it.register_traits(
-            "discord_bot", it.InterfaceTraits(voice_input_tts_only=False)
-        )
-        assert not it.is_voice_input_tts_only("discord_bot")
+        it.register_traits("synth_webui", it.InterfaceTraits(message_action="other"))
+        assert it.message_action_for("synth_webui/x") == "other"
 
     def test_user_facing_ids_excludes_non_chat_interfaces(self) -> None:
         it.register_traits(
@@ -63,7 +59,7 @@ class TestDeclared:
             it.InterfaceTraits(user_facing=False, message_action="speak_on_air"),
         )
         assert "onair" not in it.user_facing_ids()
-        assert "discord_bot" in it.user_facing_ids()
+        assert "synth_webui" in it.user_facing_ids()
         # a declared interface says how it speaks; the Core knows no name for it
         assert it.message_action_for("onair/1") == "speak_on_air"
         assert "speak_on_air" in it.message_actions()
@@ -90,14 +86,13 @@ class TestBotsAndPeers:
 
     def test_peer_ids_belong_to_the_declaring_interface(self) -> None:
         it.register_traits("signed", it.InterfaceTraits(peer_ids=True))
-        assert it.has_peer_ids("signed/1") and not it.has_peer_ids("discord_bot")
+        assert it.has_peer_ids("signed/1") and not it.has_peer_ids("synth_webui")
 
 
 def test_speech_as_media_is_declared_by_the_interface_not_named_by_the_core():
     from core.extensions.manifest import parse_manifest_text
     from core.interface_traits import traits_for
 
-    assert traits_for("discord_bot").speech_as_media is True
     assert traits_for("some_new_interface").speech_as_media is False
     manifest = parse_manifest_text(
         'schema = 1\n[extension]\nid = "dev/x"\nname = "x"\nversion = "1.0.0"\n'

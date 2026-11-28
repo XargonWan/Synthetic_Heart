@@ -63,7 +63,7 @@ class ComponentInfo:
 CORE_PLUGIN_SHORT_NAMES: frozenset[str] = frozenset({"message_plugin"})
 
 # Curated set of interfaces that must never be disabled at runtime. Every I/O
-# adapter (Discord, Matrix, OpenAI API) is safely toggle-able. The
+# adapter (Matrix, OpenAI API) is safely toggle-able. The
 # WebUI is protected because it is the very surface used to manage toggles —
 # disabling it would lock the operator out (self-lockout) until the next manual
 # config edit + restart.
@@ -1865,7 +1865,7 @@ class CoreInitializer:
 
         An interface declares its "must-have" configuration by exposing a
         ``required_config_vars`` attribute — an iterable of config-registry keys
-        (e.g. Discord: ``["DISCORD_BOT_TOKEN"]``).
+        (e.g. ``["MATRIX_USER"]``).
         Each entry may be either:
 
         * a plain string — that key must be present (AND semantics), or

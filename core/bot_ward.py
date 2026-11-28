@@ -27,7 +27,7 @@ means ``allow``.
 Who counts as a bot: the sender's ``is_bot`` flag, or — on a platform that
 enforces a naming rule and declares it (``core.interface_traits``) — a username
 ending in that suffix. A private chat is a path with a single non-negative id
-(``<interface>/123``, ``discord_bot/<user>``);
+(``<interface>/123``, ``matrix/<user>``);
 groups are out of scope (``peer_policy`` handles the known peers there).
 """
 

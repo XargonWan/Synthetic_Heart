@@ -67,7 +67,7 @@ async def test_live_search_returns_quickly_and_sends(monkeypatch):
     plugin = MemorySearchPlugin()
     action = {"payload": {"mode": "tags", "tags": ["foo"]}}
     ctx = {"interface": "discord"}
-    orig_msg = SimpleNamespace(interface_path="discord_live_123", chat_id=None)
+    orig_msg = SimpleNamespace(interface_path="live_123", chat_id=None)
 
     res = await plugin.execute_action(action, ctx, None, orig_msg)
     assert res.get("processed") is True

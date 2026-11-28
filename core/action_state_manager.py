@@ -2,7 +2,7 @@
 Global action state manager for SyntH.
 
 Tracks the current animation state (THINKING, WRITING, IDLE, etc.) globally
-across all interfaces (WebUI, Discord, etc.).
+across all interfaces (WebUI, Telegram, etc.).
 
 This is a simple in-memory state store - only holds the animation state name,
 not the complete context. The client (frontend) decides which animation to play
@@ -70,7 +70,7 @@ class ActionStateManager:
     """
     Manages the global action state for the SyntH instance.
 
-    This state is shared across ALL interfaces (WebUI, Discord, etc).
+    This state is shared across ALL interfaces (WebUI, Telegram, etc).
     It's like SyntH being in a real room - everyone sees the same state.
 
     The stack allows for nested actions (e.g., corrector entering while original
@@ -102,7 +102,7 @@ class ActionStateManager:
         Args:
             action_id: Unique identifier for this action
             phase: Initial animation phase (THINKING, WRITING, etc)
-            component: Component triggering this action (webui, discord, corrector, etc)
+            component: Component triggering this action (webui, telegram, corrector, etc)
             parent_id: If this is a nested action (e.g., corrector), reference parent
 
         Returns:

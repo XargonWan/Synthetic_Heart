@@ -936,7 +936,7 @@ def add_diary_entry(
         user_message: What the user said that triggered this response
         context_tags: Tags about the context/topic (e.g., ['food', 'cars', 'personal'])
         involved_users: List of user names involved in this interaction (from bio system)
-        interface: Interface used (telegram_bot, discord, etc.)
+        interface: Interface used (telegram_bot, matrix, etc.)
         chat_id: Chat identifier
         thread_id: Thread identifier
     """

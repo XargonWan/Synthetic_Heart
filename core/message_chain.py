@@ -452,7 +452,7 @@ def _collect_beat_allowed_paths(ctx: Optional[dict]) -> Optional[set[str]]:
     # chat where the search was prompted, never redirected elsewhere. Without
     # this, the model can deliver the results to an unrelated conversation —
     # observed: a Grillo self-initiated search (origin ``grillo/-1``, no human
-    # requester) spammed Discord channels with unsolicited store/link messages
+    # requester) spammed chat channels with unsolicited store/link messages
     # pulled from the observer snippets. Scoping to the origin means a real
     # human chat delivers only there, while an internal origin (``grillo/-1``)
     # allows no outward message_* routing at all (there is no grillo message
@@ -2928,7 +2928,7 @@ async def handle_incoming_message(
                                 f"[message_chain] Error checking Vox/TTS config: {e}"
                             )
 
-                        # For Discord, only auto-inject TTS for voice-originated
+                        # For a chat interface, only auto-inject TTS for voice-originated
                         # messages. WebUI, Matrix and the like always get TTS when VOX is active.
                         # VOX_SPEAK_TEXT_REPLIES (opt-in toggle, Engines tab) lifts the
                         # voice-input requirement so typed text replies also get a clip.

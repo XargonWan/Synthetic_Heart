@@ -1379,7 +1379,6 @@ class OpenRouterPlugin(AIPluginBase):
         interface_to_action = {
             "synth_webui": "message_synth_webui",
             "telegram_bot": "send_message",
-            "discord_bot": "send_message",
         }
         message_action = interface_to_action.get(interface, "send_message")
 
@@ -1451,8 +1450,6 @@ class OpenRouterPlugin(AIPluginBase):
             action_hint = system_message.get("action_type_hint", "")
             if "send_message" in action_hint or "message_" in action_hint:
                 interface = "telegram_bot"
-            elif "discord" in action_hint:
-                interface = "discord_bot"
             elif "synth_webui" in action_hint:
                 interface = "synth_webui"
             else:
@@ -1486,7 +1483,6 @@ class OpenRouterPlugin(AIPluginBase):
         interface_to_action = {
             "synth_webui": "message_synth_webui",
             "telegram_bot": "send_message",
-            "discord_bot": "send_message",
         }
         message_action = interface_to_action.get(interface, "send_message")
 

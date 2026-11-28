@@ -31,7 +31,7 @@ class ValidationRule:
         # shape rules and for everything that is not interface-specific.
         #
         # Without this, one interface's constraint gated every destination:
-        # Discord's 2000-character cap rejected a 2.4k reply bound for another chat
+        # A chat's 2000-character cap rejected a 2.4k reply bound for another chat
         # (4096-capable) and the corrector eventually dropped the whole turn
         # (live incident 2026-09-17 10:29Z).
         self.applies_to_interface = applies_to_interface

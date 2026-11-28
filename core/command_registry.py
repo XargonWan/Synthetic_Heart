@@ -336,7 +336,6 @@ async def status_command(interface_context=None) -> str:
 
 async def get_interface_path_command(interface_context=None) -> str:
     """Report the interface_path of the chat where the command was issued."""
-    from core.interface_path_utils import build_interface_path
 
     interface_id, _update, _context = await _resolve_interface_context(
         interface_context
@@ -345,25 +344,6 @@ async def get_interface_path_command(interface_context=None) -> str:
     scope = _chat_scope(interface_context, interface_id)
     if scope is not None and scope[2]:
         return f"📍 Interface path: `{scope[2]}`"
-
-    if isinstance(interface_context, dict):
-        interaction = interface_context.get("discord_interaction")
-        if interaction is not None:
-            guild = getattr(interaction, "guild", None)
-            channel = getattr(interaction, "channel", None)
-            guild_id = getattr(guild, "id", None)
-            channel_id = getattr(channel, "id", None)
-            if guild_id:
-                interface_path = build_interface_path(
-                    "discord_bot",
-                    str(guild_id),
-                    str(channel_id) if channel_id else None,
-                )
-            else:
-                user = getattr(interaction, "user", None)
-                user_id = getattr(user, "id", None)
-                interface_path = build_interface_path("discord_bot", str(user_id))
-            return f"📍 Interface path: `{interface_path}`"
 
     return "📍 Interface path unavailable for this interface."
 

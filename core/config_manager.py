@@ -447,7 +447,7 @@ class ConfigRegistry:
         be called automatically.
 
         Args:
-            component: Component name (e.g., "example_chat", "discord_bot")
+            component: Component name (e.g., "example_chat", "telegram_bot")
             handler: Async callable that performs the reload (e.g., reload_interface)
 
         Example:

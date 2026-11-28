@@ -6,9 +6,9 @@ interface_name/level1/level2/level3/...
 
 Examples:
 - example_chat/123456/2 - example chat, channel 123456, thread 2
-- discord_bot/ab1234/cd423/4 - Discord bot, server ab1234, channel cd423, post 4
+- example_chat/ab1234/cd423/4 - Example chat, server ab1234, channel cd423, post 4
 - example_chat/6789 - example chat, user 6789
-- discord_bot/Xargon - Discord bot, user Xargon
+- example_chat/Xargon - Example chat, user Xargon
 """
 
 from typing import Optional, List, Tuple, Dict, Any
@@ -19,7 +19,7 @@ def build_interface_path(interface_name: str, *levels: Any) -> str:
     """Build an interface path from components.
 
     Args:
-        interface_name: The interface name (e.g., 'example_chat', 'discord_bot')
+        interface_name: The interface name (e.g., 'example_chat', 'example_chat')
         *levels: Variable number of hierarchical levels
 
     Returns:
@@ -28,8 +28,8 @@ def build_interface_path(interface_name: str, *levels: Any) -> str:
     Examples:
         >>> build_interface_path('example_chat', '123456', '2')
         'example_chat/123456/2'
-        >>> build_interface_path('discord_bot', 'ab1234')
-        'discord_bot/ab1234'
+        >>> build_interface_path('example_chat', 'ab1234')
+        'example_chat/ab1234'
     """
     # Filter out None values and convert all to strings
     valid_levels = [str(level) for level in levels if level is not None]
@@ -87,8 +87,8 @@ def parse_interface_path(interface_path: str) -> Tuple[str, List[str]]:
     Examples:
         >>> parse_interface_path('example_chat/123456/2')
         ('example_chat', ['123456', '2'])
-        >>> parse_interface_path('discord_bot/Xargon')
-        ('discord_bot', ['Xargon'])
+        >>> parse_interface_path('example_chat/Xargon')
+        ('example_chat', ['Xargon'])
     """
     if not interface_path:
         return ("", [])

@@ -10,7 +10,7 @@ Interface contract (optional, structural):
 ``async def send_activity(self, interface_path: str, kind: str) -> None``
     Show one indicator pulse in the conversation ``interface_path``. ``kind`` is
     one of ``KIND_*`` below; an interface that has no wording for a kind uses the
-    nearest one (Discord has only "typing"). Chat clients drop the indicator after
+    nearest one (some platforms have only "typing"). Chat clients drop the indicator after
     a few seconds, so core repeats the pulse every ``REFRESH_SECONDS``.
 
 Core calls:

@@ -1307,7 +1307,7 @@ class SoulPlugin(PluginBase):
         return "\n".join(parts)
 
     # The interfaces cache the persona's OWN messages under the canonical label
-    # "self" (`sender_name="self"`, the same convention Discord, Telegram and the
+    # "self" (`sender_name="self"`, the same convention Telegram and the
     # Vessel use). Handed to an extractor as-is, "self" is an unnamed third party
     # in a conversation that may hold several people, and the DSP extractor then
     # has to GUESS which speaker is the human from the other labels alone.

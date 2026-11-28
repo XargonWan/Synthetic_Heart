@@ -4,7 +4,7 @@ The SyntH can answer a call: a live audio or video conversation with a person.
 This module owns the *concept* of a call once, for every interface:
 
 * :class:`CallProvider` — what an interface implements to host calls (WebUI
-  today; Discord, … register the same way). The manager never imports
+  today; …, register the same way). The manager never imports
   an interface library: providers are optional components that fail closed.
 * :class:`CallSession` — one live call (who, where, audio or video, state).
 * :class:`CallManager` — registry of providers, the active sessions, the

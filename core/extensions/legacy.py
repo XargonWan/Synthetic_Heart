@@ -91,6 +91,8 @@ COMPONENTS: tuple[Component, ...] = (
         required=("FLUXER_TOKEN",),
         enabled_keys=("INTERFACE_ENABLED__fluxer_bot",),
     ),
+    # The built-in Discord interface was removed in commit 5ef38749 (find its files with
+    # ``git log --diff-filter=D -- interface/discord_interface``); official/discord replaces it.
     Component(
         "official/discord",
         {

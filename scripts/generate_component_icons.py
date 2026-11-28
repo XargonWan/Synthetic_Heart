@@ -35,7 +35,6 @@ OUT_DIR = (
 # assets.
 PALETTE: dict[str, tuple[tuple[int, int, int], tuple[int, int, int]]] = {
     "telegram_bot": ((41, 128, 185), (255, 255, 255)),  # blue tile, white plane
-    "discord_bot": ((88, 101, 242), (255, 255, 255)),  # indigo tile, white face
     "matrix_chat": ((30, 30, 30), (255, 255, 255)),  # dark tile, white brackets
     "fluxer_bot": ((123, 44, 191), (255, 255, 255)),  # violet tile, white bolt
 }
@@ -66,16 +65,6 @@ def _draw_telegram(draw: ImageDraw.ImageDraw, fg: tuple[int, int, int]) -> None:
     ]
     draw.polygon(plane, fill=fg + (255,))
     draw.line([(198, 74), (108, 150)], fill=(0, 0, 0, 40), width=3)
-
-
-def _draw_discord(draw: ImageDraw.ImageDraw, fg: tuple[int, int, int]) -> None:
-    """A rounded speech bubble with two dot 'eyes' (generic chat glyph)."""
-    draw.rounded_rectangle([60, 74, 196, 168], radius=40, fill=fg + (255,))
-    # tail
-    draw.polygon([(84, 160), (84, 196), (116, 168)], fill=fg + (255,))
-    # eyes
-    draw.ellipse([98, 108, 118, 134], fill=(88, 101, 242, 255))
-    draw.ellipse([138, 108, 158, 134], fill=(88, 101, 242, 255))
 
 
 def _draw_matrix(draw: ImageDraw.ImageDraw, fg: tuple[int, int, int]) -> None:
@@ -112,7 +101,6 @@ def _draw_fluxer(draw: ImageDraw.ImageDraw, fg: tuple[int, int, int]) -> None:
 
 DRAWERS = {
     "telegram_bot": _draw_telegram,
-    "discord_bot": _draw_discord,
     "matrix_chat": _draw_matrix,
     "fluxer_bot": _draw_fluxer,
 }

@@ -1,6 +1,6 @@
 """Delivery circuit breaker + dead-target registry.
 
-SyntH was hammering a single stale Discord channel with 16+ identical
+SyntH was hammering a single stale chat channel with 16+ identical
 "Unknown channel or user" failures in a two-minute window (and ~76
 ``delivery_failed`` rows/day). This module is the reusable guard that stops
 that loop: after ``DELIVERY_BREAKER_MAX_FAILURES`` consecutive *dead-target*
@@ -126,15 +126,6 @@ def classify_delivery_failure(exc: BaseException | None) -> str:
         return "transient"
     if isinstance(exc, DeadTargetError):
         return "dead_target"
-
-    # Discord's own exception hierarchy (structural, no string matching).
-    try:
-        import discord
-
-        if isinstance(exc, (discord.errors.NotFound, discord.errors.Forbidden)):
-            return "dead_target"
-    except Exception:  # pragma: no cover - discord optional
-        pass
 
     message = str(exc or "").lower()
     for marker in _DEAD_TARGET_MARKERS:

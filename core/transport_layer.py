@@ -267,7 +267,7 @@ async def _call_interface_send(interface_send_func, *args, **kwargs):
             if isawaitable(result):
                 return await result
             return result
-        # Retry 2: payload-style interfaces (e.g. Discord/Matrix) expose
+        # Retry 2: payload-style interfaces (e.g. Matrix) expose
         # ``send_message(payload: dict, original_message=None)`` and do NOT accept a
         # ``text=`` keyword. universal_send/_send_text forward ``text=`` directly,
         # which the normal action path never does (it passes a payload dict
@@ -2973,7 +2973,6 @@ async def run_corrector_middleware(
             # override above had nothing to resolve and the legacy label
             # survived).
             _legacy_iface_labels = {
-                "discord": "discord_bot",
                 "webui": "synth_webui",
             }
             iface_label = (

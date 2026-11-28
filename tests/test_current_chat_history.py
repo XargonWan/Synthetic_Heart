@@ -397,7 +397,7 @@ def test_load_chat_history_for_guild_queries(monkeypatch):
                 def isoformat(self):
                     return "2026-01-01T00:00:00"
 
-            return [("Alice", "alice", "hello", T(), "discord_123_456")]
+            return [("Alice", "alice", "hello", T(), "live_text_123_456")]
 
         async def __aenter__(self):
             return self
@@ -438,13 +438,13 @@ def test_load_chat_history_for_guild_queries(monkeypatch):
     result = asyncio.run(load_chat_history_for_guild(123, since=None, limit=5))
     assert len(result) == 1
     msg = result[0]
-    assert msg["interface_path"] == "discord_123_456"
+    assert msg["interface_path"] == "live_text_123_456"
     # check that query included LIKE pattern and limit
     cur = cursor_holder.get("cur")
     assert cur is not None
     assert "interface_path LIKE" in cur.last_query
     # interface paths start with the guild prefix, no leading wildcard necessary
-    assert cur.last_params[0].startswith("discord_123_")
+    assert cur.last_params[0].startswith("live_text_123_")
     assert cur.last_params[0].endswith("%")
     assert cur.last_params[-1] == 5
 

@@ -627,11 +627,11 @@ class MemorySearchPlugin:
         # the new async live search path
         interface_path = getattr(original_message, "interface_path", "")
         if isinstance(interface_path, str) and interface_path.startswith(
-            "discord_live_"
+            "live_"
         ):
             # extract guild id from path
             try:
-                guild_id = int(interface_path.split("_")[2])
+                guild_id = int(interface_path.split("_")[1])
             except Exception:
                 guild_id = None
             if guild_id is not None:

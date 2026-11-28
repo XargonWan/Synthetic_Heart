@@ -57,7 +57,7 @@ def get_send_message_schema(
         "Send a message through any connected chat interface. The destination "
         "is `interface_path` (e.g. 'example_chat/@username', "
         "'example_chat/<chat_id>[/<thread_id>]', "
-        "'discord_bot/<guild_id>/<channel_id>', 'matrix/<room_id>'; prefer the "
+        "'matrix/<room_id>'; prefer the "
         "@username form when the person has one); when "
         "replying to an incoming message you may omit it and the reply "
         "auto-routes to the origin conversation. Provide `text` and/or "

@@ -1285,7 +1285,7 @@ class VesselInterface:
         * **Direct address bypass**: an in-world *chat* line (``event_type ==
           "chat"``) that names Synth — resolved via the persona's own
           name/aliases with :func:`core.mention_utils.is_synth_mentioned`, the
-          very same mechanism Telegram/Discord use — is *always* salient. It
+          very same mechanism Telegram uses — is *always* salient. It
           skips the dedup and rate-limit gates so that when a player speaks to
           Synth directly she never misses it under a burst of automatic movement
           perceptions. This is address detection (who is being spoken to), not

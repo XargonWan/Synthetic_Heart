@@ -929,7 +929,7 @@ class AgentLoopManager:
     ) -> Optional[Dict[str, Any]]:
         """Find a paused (``pending``) agentic task for the given interface.
 
-        A single interface (a Matrix room, a Discord channel, a WebUI
+        A single interface (a Matrix room, a chat channel, a WebUI
         session) must never own two parallel pending agentic tasks. When a
         turn exhausts its budget without an explicit completion it is parked as
         ``pending``; the very next message from that same ``interface_path``
@@ -1268,7 +1268,7 @@ class AgentLoopManager:
 
         This is the single, source-agnostic persistence point for
         :meth:`run_agentic_turn`. Every caller — the message-chain Agent Lane
-        (Discord / API), the WebUI ``/api/agent/run`` route, or any
+        (a chat / API), the WebUI ``/api/agent/run`` route, or any
         future entry point — produces a row visible in the WebUI Agent panel,
         regardless of which interface originated the turn.
 
@@ -2153,7 +2153,7 @@ class AgentLoopManager:
             # CRITICAL: a pure-message call must still be ACTUALLY DELIVERED to
             # the originating interface via the tool executor. Historically the
             # text was only captured into ``final_text`` and never executed, so
-            # on an asynchronous interface (Discord) the message was
+            # on an asynchronous interface (a chat) the message was
             # silently never sent while the turn still claimed to have replied.
             # We now execute every pure-message through ``agent_tool_executor``
             # exactly like any other action, recording the delivery outcome.
@@ -2772,7 +2772,7 @@ class AgentLoopManager:
         # author the "I'm not done, shall I continue?" message itself, in the
         # conversation's own language/tone, instead of shipping a hardcoded
         # English string. Overwrite ``final_text`` with the composed message so
-        # every delivery path (Discord/API) shows Synth's own words.
+        # every delivery path (chat/API) shows Synth's own words.
         if stop_reason == "paused_max_iterations":
             actions_executed = 0
             for obs in observations:

@@ -452,7 +452,7 @@ def _relative_age_marker(ts: Any, now: datetime | None = None) -> str:
 _REPLY_QUOTE_MAX_CHARS = 200
 
 # The interfaces cache the persona's OWN messages under the canonical label
-# "self" (Discord and the Vessel all do), and this block renders the
+# "self" (the chats and the Vessel all do), and this block renders the
 # stored label verbatim. In a block that also carries named people, a bare
 # "self" names nobody: measured live (2026-09-24, the 2D deployment) the model
 # read its own group-chat lines as the human's, asked him to explain a sentence
@@ -1030,7 +1030,7 @@ class HistoryEngine:
                 # same guild/user context.  This mirrors the behaviour of the normal
                 # prompt path and guards against stale data if the periodic sync task
                 # missed something.
-                if interface_path and interface_path.startswith("discord_live_"):
+                if interface_path and interface_path.startswith("live_"):
                     try:
                         from core.config_manager import config_registry as _cfg
 

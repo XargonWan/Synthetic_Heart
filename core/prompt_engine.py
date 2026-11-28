@@ -321,7 +321,6 @@ _NON_USER_FACING_ACTION_HINTS = (
 _SYSTEM_ONLY_ACTION_NAMES: frozenset[str] = frozenset(
     {
         "static_inject",
-        "audio_discord_bot",
         "tts_speak",
     }
 )
@@ -443,7 +442,7 @@ def _derive_outbound_beat_target_interfaces(
 
     Grillo observer beats run under the synthetic ``grillo`` interface, but
     their snippets and eligible-target list can point at real interfaces such
-    as ``example_chat`` or ``discord_bot``.  The prompt must expose message
+    as ``example_chat`` or ``telegram_bot``.  The prompt must expose message
     actions for those offered interfaces so the model can use the target paths
     it was given.  This deliberately reads only routing metadata; it never
     infers an interface from message text.
@@ -772,7 +771,7 @@ _MEMORY_SOURCE_LABELS = {
 
 
 # The interfaces cache the persona's OWN messages under the canonical label
-# "self" (Discord and the Vessel all do), so a recalled raw line that
+# "self" (the chats and the Vessel all do), so a recalled raw line that
 # carries one of these labels is the synth's own words and must never render as
 # a third party's.
 _SELF_SPEAKER_LABELS = frozenset({"self", "me", "assistant", "synt", "synth", "bot"})
@@ -3097,8 +3096,8 @@ async def build_prompt_request(
             _source_dict["chat_type"] = _src_chat_kind
     except Exception as _who_exc:  # pragma: no cover - defensive
         log_debug(f"[json_prompt] sender identity fields skipped: {_who_exc}")
-    # If the sender is currently in a Discord voice channel, tell the model —
-    # this is what allows it to decide to issue join_voice_discord.
+    # If the sender is currently in a voice channel, tell the model — this is
+    # what lets it decide to join (the interface's own join action).
     _voice_channel_id = isinstance(context_memory, dict) and context_memory.get(
         "voice_channel_id"
     )
@@ -4722,7 +4721,7 @@ async def build_live_prompt_request(
         message: Optional message object for context.
         context_memory: Optional context memory object.
         attachment_context: Optional pre-formatted document text to embed
-            in the system instruction (e.g. from Discord attachments).
+            in the system instruction (e.g. from chat attachments).
 
     Returns:
         ``PromptRequest`` containing the assembled live instruction text.
@@ -4888,7 +4887,7 @@ async def build_live_prompt_request(
 
     # --- Recent cross-interface chat history ---
     # This keeps the model aware of conversations on other interfaces
-    # (Matrix, other Discord channels) so it stays consistent.
+    # (Matrix, other channels) so it stays consistent.
     try:
         from core.chat_history_cache import load_global_chat_history
         from core.interface_path_utils import is_vessel_history_entry

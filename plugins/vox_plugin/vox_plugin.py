@@ -5,7 +5,7 @@ Centralises the complete text-to-speech output pipeline:
   1. Clean text (strip emoji / markup).
   2. Delegate to the active Vox engine for audio generation.
   3. Write the audio blob to disk (handles WAV and raw-PCM engines).
-  4. Dispatch audio to the requesting interface (WebUI, Discord, Telegram, …).
+  4. Dispatch audio to the requesting interface (WebUI, Telegram, …).
   5. Trigger lip-sync animation in the WebUI if available.
   6. Optionally fall back to plain-text when generation fails.
 
@@ -219,14 +219,14 @@ config_registry.get_value(
 )
 # Visible toggle (Engines tab → vox_plugin box): when on, replies to typed
 # text messages also get a TTS clip attached on every interface. Off keeps
-# the default behavior (Telegram/Discord only speak in reply to voice input).
+# the default behavior (chats only speak in reply to voice input).
 config_registry.get_value(
     "VOX_SPEAK_TEXT_REPLIES",
     False,
     label="Attach voice to text replies",
     description=(
         "When enabled, replies to typed text messages also get a voice clip "
-        "attached (all interfaces). When disabled, Telegram/Discord replies "
+        "attached (all interfaces). When disabled, chat replies "
         "are only spoken when the incoming message was voice."
     ),
     value_type=bool,
@@ -1130,7 +1130,7 @@ class VoxPlugin(AIPluginBase):
         streaming applies to this call, else ``None``.
 
         Chunking is scoped narrowly on purpose: only the live webui/stage
-        avatar path (Telegram/Discord/etc. still get exactly one clip per
+        avatar path (Telegram/etc. still get exactly one clip per
         reply — chunking would mean N separate voice messages, which is a
         regression there, not an improvement), never when facial-expression
         tags are present (``_schedule_expression_timeline`` anchors its
@@ -1389,7 +1389,7 @@ class VoxPlugin(AIPluginBase):
                 #
                 # The payload goes as the SINGLE positional argument because
                 # that is the only convention all interfaces share: telegram is
-                # ``(payload, original_message)`` while discord/matrix are
+                # ``(payload, original_message)`` while matrix is
                 # ``(channel_id=None, text=None)`` and detect a dict first
                 # argument themselves — passing original_message positionally
                 # would land in their ``text`` parameter.

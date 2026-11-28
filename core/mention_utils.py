@@ -111,7 +111,7 @@ def get_current_aliases() -> list[str]:
 async def get_bot_username(bot):
     """Get the bot's username from the bot instance."""
     try:
-        # Handle different bot shapes (Discord, etc.)
+        # Handle different bot shapes (a client with .user, etc.)
         # 1) direct attribute (some wrappers expose .username)
         if hasattr(bot, "username"):
             return bot.username
@@ -119,7 +119,7 @@ async def get_bot_username(bot):
         if hasattr(bot, "get_me"):
             me = await bot.get_me()
             return getattr(me, "username", None)
-        # 3) discord.py Client/Cog exposes .user with .name and .id
+        # 3) a client object exposes .user with .name and .id
         if hasattr(bot, "user") and getattr(bot, "user") is not None:
             user = getattr(bot, "user")
             return getattr(user, "name", None) or getattr(user, "username", None)
@@ -321,7 +321,7 @@ async def is_message_for_bot(
                 return True, None
 
             # Check if reply is to bot by ID
-            # Support different bot shapes: bot.id or bot.user.id (discord.py)
+            # Support different bot shapes: bot.id or bot.user.id
             bot_id = None
             try:
                 if hasattr(bot, "id"):

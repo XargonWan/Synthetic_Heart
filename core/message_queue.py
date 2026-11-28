@@ -63,7 +63,7 @@ PRIORITY_CALL = 9  # A turn inside a live audio/video call (above all chat)
 PRIORITY_HIGH = 8  # Direct prioritised human input (e.g. in-world player chat)
 PRIORITY_TRAINER = 7  # The trainer — must always reach Synth promptly
 PRIORITY_ELEVATED = 6  # Time-bound background turns an extension starts (e.g. live commentary); never above people
-PRIORITY_GENERAL = 5  # Ordinary user chat (discord/matrix/webui/HTTP API…)
+PRIORITY_GENERAL = 5  # Ordinary user chat (telegram/matrix/webui/HTTP API…)
 PRIORITY_AMBIENT = 4  # Autonomous vessel perceptions / will-beats (below humans)
 PRIORITY_LOW = 3  # Background-adjacent (web-search 2nd-pass, misc fallback)
 PRIORITY_BACKGROUND = 2  # G.R.I.L.L.O. beats — absolute bottom, never starves anything
@@ -392,7 +392,7 @@ def _reply_context_from_message(message: object) -> dict[str, str] | None:
 
     When the user REPLIES to an earlier message, the interfaces attach the
     platform reply payload on ``message.reply_to_message`` (platform wrapper,
-    Discord SimpleNamespace, Matrix fallback-parse namespace).
+    an interface's SimpleNamespace, Matrix fallback-parse namespace).
     The Agent Lane never sees that attribute — its prompt is built only from
     goal + observations + context — so without this the model answers a quote
     it cannot read. Returns ``{"sender_name", "text"}`` or None. Purely
@@ -2307,7 +2307,7 @@ async def _consumer_loop() -> None:
 
                         # Propagate voice channel presence so the prompt engine can
                         # inform the LLM that the sender is in a voice channel — this
-                        # lets the model decide to issue join_voice_discord.
+                        # lets the model decide to join it (the interface's own join action).
                         _vc_id = getattr(_queued_msg, "voice_channel_id", None)
                         if _vc_id:
                             context["voice_channel_id"] = str(_vc_id)

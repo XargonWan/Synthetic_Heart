@@ -296,8 +296,8 @@ async def _apply_one(
         # account. That is what an upload or "Resend avatar" is for.
         if catch_up and not applied_version(name):
             return "skipped: never synced (use Resend avatar)"
-        # Unchanged since the last time: nothing to send (and Discord, for one,
-        # rate-limits avatar changes hard). A resend skips this.
+        # Unchanged since the last time: nothing to send (and some platforms
+        # rate-limit avatar changes hard). A resend skips this.
         if not force and applied_version(name) == (version or ""):
             return "skipped: already applied"
         call_kwargs: dict[str, Any] = {}

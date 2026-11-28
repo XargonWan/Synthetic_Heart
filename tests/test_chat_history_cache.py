@@ -72,7 +72,7 @@ async def test_save_chat_message_triggers_live_context(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_save_chat_message_skips_live_path(monkeypatch):
-    """Messages from discord_live_* should not trigger context updates."""
+    """Messages from live_* should not trigger context updates."""
     calls = []
 
     class DummyMgr:
@@ -120,7 +120,7 @@ async def test_save_chat_message_skips_live_path(monkeypatch):
     )
 
     result = await chat_history_cache.save_chat_message(
-        interface_path="discord_live_123",
+        interface_path="live_123",
         message_text="ignore me",
     )
     await asyncio.sleep(0)

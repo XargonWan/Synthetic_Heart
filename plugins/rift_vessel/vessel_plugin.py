@@ -1464,7 +1464,7 @@ class VesselPlugin(AIPluginBase):
         """Echo Synth's own in-world *speech* into the world chat history.
 
         When Synth speaks in a world (the ``say`` verb) its line must appear in
-        the shared world conversation just like on Telegram/Discord, attributed
+        the shared world conversation just like on Telegram, attributed
         to itself. We persist it with the canonical ``sender_name="self"``
         convention (the same one every chat interface uses for Synth's own
         turns), so the history/prompt layer renders it as a ``Self:`` line and

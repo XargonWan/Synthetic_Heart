@@ -689,7 +689,6 @@ class XaiGrokPlugin(AIPluginBase):
         interface_to_action = {
             "synth_webui": "message_synth_webui",
             "telegram_bot": "send_message",
-            "discord_bot": "send_message",
         }
         message_action = interface_to_action.get(interface, "send_message")
 

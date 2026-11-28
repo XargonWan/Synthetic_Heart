@@ -427,7 +427,7 @@ async def find_channel_groups(terms: list[str]) -> list[dict[str, Any]]:
     A term matches a path when it appears (case-insensitively) in any of the
     path's ``segment_labels``. Matches are grouped by root prefix
     (``interface_name/level1``); one term can match multiple groups across
-    interfaces (e.g. a "Dojo del Chaos" on both Matrix and Discord).
+    interfaces (e.g. a "Dojo del Chaos" on both Matrix and Telegram).
 
     Returns a list of groups::
 

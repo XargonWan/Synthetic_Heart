@@ -5,7 +5,7 @@ Converts the model-agnostic ``ToolManifest`` list produced by
 list required by the Gemini Live API ``tools`` session parameter.
 
 The adapter mirrors the behaviour of the legacy
-``discord_interface._build_gemini_tool_declarations()`` function but works
+function it replaced but works
 from manifests rather than from the action registry directly, making it
 reusable across any code path that needs Gemini-formatted declarations.
 """

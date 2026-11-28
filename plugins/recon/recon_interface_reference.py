@@ -2,7 +2,7 @@
 """Recon Interface Reference.
 
 An LLM-gated Recon plugin that fires only when the user's message talks about a
-chat *platform / interface* ("scrivimi su telegram", "post it on Discord").
+chat *platform / interface* ("scrivimi su telegram", "post it on Matrix").
 
 The always-present ``[Interfaces]`` prompt line lists the active interface ids
 and nothing more. This plugin adds the detail, but only when it is wanted:
@@ -109,7 +109,7 @@ class ReconInterfaceReferencePlugin:
         return (
             "Determine whether the user's message talks about a chat platform "
             "or messaging interface as a place to write, send, reply or be "
-            "reached (for example 'write me on Telegram', 'post it on Discord', "
+            "reached (for example 'write me on Telegram', 'post it on Matrix', "
             "'scrivimi sul bot'). Extract each platform or interface name "
             "exactly as the user expressed it, in any language. Return an "
             'object: {"interface_reference": ["name1", ...]}. If the message '

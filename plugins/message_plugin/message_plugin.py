@@ -56,8 +56,6 @@ class MessagePlugin:
         """Return the action types this plugin supports."""
         return [
             "message_reddit",
-            "message_discord",
-            "message_discord_bot",
             "message_x",
             "message_synth_webui",
         ]
@@ -73,7 +71,6 @@ class MessagePlugin:
         and ensure context (like TTS audio) is passed to interface execution.
         """
         return {
-            "message_discord_bot": {},
             "message_synth_webui": {},
             "message_reddit": {},
             "message_x": {},
@@ -163,7 +160,7 @@ class MessagePlugin:
         """Reason an internal Grillo beat must not speak into a public chat.
 
         Unchanged behaviour, moved out of the delivery path: for **public** chats
-        (Telegram groups/channels, Discord/Reddit/Matrix rooms) an internal beat
+        (Telegram groups/channels, Reddit/Matrix rooms) an internal beat
         is dropped when the synth spoke last (``GRILLO_SUPPRESS_INACTIVE``) or
         when its text is close to anything already in that chat
         (``GRILLO_DUP_SIMILARITY_THRESHOLD``). Private chats are deliberately not
@@ -191,7 +188,7 @@ class MessagePlugin:
         # Check if public chat logic
         is_public = False
         # Simple heuristic: an interface whose negative chat ids are groups (it
-        # declares that in its manifest), or Discord/Reddit/Matrix channels
+        # declares that in its manifest), or Reddit/Matrix channels
         if (
             interface_name
             and target
@@ -203,7 +200,7 @@ class MessagePlugin:
             except Exception:
                 pass
         elif (
-            interface_name in ["discord", "discord_bot", "reddit", "matrix"] and target
+            interface_name in ["reddit", "matrix"] and target
         ):
             is_public = True
 
@@ -365,8 +362,6 @@ class MessagePlugin:
         action_type = action.get("type", "")
         interface_map = {
             "message_reddit": "reddit",
-            "message_discord": "discord",
-            "message_discord_bot": "discord_bot",
             "message_x": "x",
             "message_synth_webui": "synth_webui",
         }

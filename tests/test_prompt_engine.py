@@ -1473,7 +1473,7 @@ class TestHistoryToTurns:
         """Lines with [from ...] prefix should still parse sender and content."""
         lines = [
             '[from discord_bot/123/456] [12/04/26:2035] Remuraine: "Hello"',
-            '[from discord_live_123] [12/04/26:2035] self: "Hi back"',
+            '[from live_123] [12/04/26:2035] self: "Hi back"',
         ]
         turns = self._call(lines, {"synth"})
         assert len(turns) == 2

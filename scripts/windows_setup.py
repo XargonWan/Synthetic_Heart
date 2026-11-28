@@ -305,7 +305,6 @@ def _write_env(values: dict[str, str]) -> None:
             "Interface credentials",
             [
                 "BOTFATHER_TOKEN",
-                "DISCORD_BOT_TOKEN",
                 "MATRIX_HOMESERVER",
                 "MATRIX_USER",
                 "MATRIX_PASSWORD",
@@ -689,21 +688,6 @@ def stage_env(args: argparse.Namespace, db_conf: dict[str, str]) -> bool:
                 t = _ask("BotFather token", default=existing.get("BOTFATHER_TOKEN", ""))
                 if t:
                     values["BOTFATHER_TOKEN"] = t
-            except _Back:
-                pass
-
-        _hint(
-            "Discord: rich embeds, server-based. Create a bot at discord.com/developers."
-        )
-        if _confirm(
-            "Enable Discord bot?", default=bool(existing.get("DISCORD_BOT_TOKEN"))
-        ):
-            try:
-                t = _ask(
-                    "Discord bot token", default=existing.get("DISCORD_BOT_TOKEN", "")
-                )
-                if t:
-                    values["DISCORD_BOT_TOKEN"] = t
             except _Back:
                 pass
 

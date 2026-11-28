@@ -527,7 +527,7 @@ class GeminiAPIPlugin(AIPluginBase):
             return None
 
     # ------------------------------------------------------------------
-    # Gemini Live API (WebSocket) — Discord voice integration
+    # Gemini Live API (WebSocket) — live voice sessions
     # ------------------------------------------------------------------
 
     def get_live_session_manager(self) -> "LiveSessionManager | None":
@@ -550,14 +550,14 @@ class GeminiAPIPlugin(AIPluginBase):
         channel_id: int,
         system_instruction: str | None = None,
     ) -> bool:
-        """Start a Live API session for Discord voice.
+        """Start a Live API session for a voice channel.
 
         If no system_instruction is provided, one is built automatically
         from the current persona via prompt_engine.
 
         Args:
-            guild_id: Discord guild ID.
-            channel_id: Discord voice channel ID.
+            guild_id: The session key (one session per server).
+            channel_id: The voice channel id.
             system_instruction: Optional pre-built system instruction text.
 
         Returns:
@@ -1043,7 +1043,6 @@ class GeminiAPIPlugin(AIPluginBase):
         interface_to_action = {
             "synth_webui": "message_synth_webui",
             "telegram_bot": "send_message",
-            "discord_bot": "send_message",
         }
         message_action = interface_to_action.get(interface, "send_message")
 
@@ -2030,8 +2029,6 @@ class GeminiAPIPlugin(AIPluginBase):
             action_hint = system_message.get("action_type_hint", "")
             if "send_message" in action_hint or "message_" in action_hint:
                 interface = "telegram_bot"
-            elif "discord" in action_hint:
-                interface = "discord_bot"
             elif "synth_webui" in action_hint:
                 interface = "synth_webui"
             else:
@@ -2086,7 +2083,6 @@ Do NOT include any message_* actions.
         interface_to_action = {
             "synth_webui": "message_synth_webui",
             "telegram_bot": "send_message",
-            "discord_bot": "send_message",
         }
         message_action = interface_to_action.get(interface, "send_message")
 

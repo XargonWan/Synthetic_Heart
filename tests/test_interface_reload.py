@@ -1,14 +1,13 @@
 """Editing an interface's config in the WebUI must restart that interface.
 
 Covers the generic in-place restart used by interfaces without their own
-``reload_interface``, Discord's ``stop()``/re-open, and Telegram's reload
+``reload_interface``, Telegram's reload
 actually starting the bot again.
 """
 
 from __future__ import annotations
 
 import asyncio
-from typing import Any
 
 import pytest
 
@@ -73,67 +72,3 @@ def test_reload_handler_is_registered_for_interface_without_one(
     core_initializer._register_reload_handlers()
 
     assert "no_reload_bot" in config_registry._reload_handlers
-
-
-# ------------------------------------------------------------------ Discord
-
-
-class _FakeDiscordClient:
-    def __init__(self, closed: bool) -> None:
-        self._closed = closed
-        self.cleared = 0
-
-    def is_closed(self) -> bool:
-        return self._closed
-
-    async def close(self) -> None:
-        self._closed = True
-
-    def clear(self) -> None:
-        self._closed = False
-        self.cleared += 1
-
-
-def _discord_interface(client: Any) -> Any:
-    from interface.discord_interface import DiscordInterface
-
-    iface = object.__new__(DiscordInterface)
-    iface.client = client
-    return iface
-
-
-@pytest.mark.asyncio
-async def test_discord_stop_closes_the_client() -> None:
-    client = _FakeDiscordClient(closed=False)
-    await _discord_interface(client).stop()
-    assert client.is_closed()
-
-
-@pytest.mark.asyncio
-async def test_discord_stop_without_client_is_a_noop() -> None:
-    await _discord_interface(None).stop()
-
-
-@pytest.mark.asyncio
-async def test_discord_start_reopens_a_closed_client(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    import interface.discord_interface as di
-
-    client = _FakeDiscordClient(closed=True)
-    iface = _discord_interface(client)
-    started: list[bool] = []
-
-    async def _fake_start_client() -> None:
-        started.append(client.is_closed())
-
-    monkeypatch.setattr(di, "get_discord_token", lambda: "token")
-    monkeypatch.setattr(iface, "_register_trainer_id", lambda: None, raising=False)
-    monkeypatch.setattr(iface, "_start_discord_client", _fake_start_client)
-
-    await iface.start()
-
-    assert client.cleared == 1
-    assert started == [False]
-
-

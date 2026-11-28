@@ -8,7 +8,7 @@ interface to apply voice-activity detection on raw PCM audio streams.
 
 Silero VAD is a *utility* — it listens and reports whether someone is speaking.
 It is not a conversational endpoint.  Any component (WebUI streaming endpoint,
-Discord voice capture, future ambient listener …) can use it without going
+a voice channel's capture, future ambient listener …) can use it without going
 through the plugin or Live registry.
 
 Usage example

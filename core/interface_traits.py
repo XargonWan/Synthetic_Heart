@@ -1,6 +1,6 @@
 """What the Core needs to know about an interface, declared by the interface.
 
-The Core used to keep lists of interface names (``telegram_bot``, ``discord_bot``,
+The Core used to keep lists of interface names (``telegram_bot``, ``matrix``,
 ...) in the message chain, the action parser and several helpers, each answering
 one question about an interface: is it a place a person talks to, does it only get
 speech for voice input, which action sends to it, does the sign of a chat id say
@@ -57,7 +57,6 @@ DEFAULT = InterfaceTraits()
 
 #: Interfaces that ship inside the Core. Extensions declare their own traits.
 CORE_INTERFACES: dict[str, InterfaceTraits] = {
-    "discord_bot": InterfaceTraits(voice_input_tts_only=True, speech_as_media=True),
     "synth_webui": InterfaceTraits(message_action="message_synth_webui"),
 }
 

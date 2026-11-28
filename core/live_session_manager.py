@@ -10,7 +10,7 @@ Manages WebSocket sessions to the Gemini Live API, handling:
 - Session duration tracking and automatic reconnection
 
 Audio format: PCM 16-bit signed little-endian, 16000 Hz, mono.
-Discord provides 48kHz stereo; the sink downsamples to 16kHz mono before
+A voice channel provides 48kHz stereo; the sink downsamples to 16kHz mono before
 sending to the Gemini Live API.
 """
 
@@ -28,7 +28,7 @@ from core.live_api_logger import log_live_send, log_live_recv, log_live_session_
 from core.live_tool_executor import LiveToolExecutor
 
 # PCM audio constants for Gemini Live API
-# Discord provides 48kHz PCM; we downsample to 16kHz before sending.
+# Voice channels provide 48kHz PCM; we downsample to 16kHz before sending.
 LIVE_AUDIO_SAMPLE_RATE = 16000
 LIVE_AUDIO_MIME = f"audio/pcm;rate={LIVE_AUDIO_SAMPLE_RATE}"
 # Gemini outputs 24kHz PCM by default
@@ -234,13 +234,13 @@ class LiveSessionState:
 
 
 class LiveSessionManager:
-    """Manages Gemini Live API sessions for Discord voice channels.
+    """Manages Gemini Live API sessions for voice channels.
 
     One session per guild — when the bot joins a voice channel in a guild,
     a Live API WebSocket session is opened. When it leaves, the session closes.
 
     This class is instantiated by the Cortex live engines but is also used
-    directly by tests and by memory_search/discord_interface.  For convenience
+    directly by tests and by memory_search.  For convenience
     we provide a simple singleton accessor that lazily creates the manager.
     """
 
@@ -305,7 +305,7 @@ class LiveSessionManager:
         self._flush_tasks: dict[int, asyncio.Task[None]] = {}
         # Deferred context-update flush tasks: guild_id -> Task
         self._pending_update_flush_tasks: dict[int, asyncio.Task[None]] = {}
-        # Guild playback-state probes supplied by the Discord interface so we
+        # Guild playback-state probes supplied by the interface so we
         # can avoid injecting new text while buffered audio is still speaking.
         self._playback_active_callbacks: dict[int, Callable[[], bool]] = {}
         # Periodic history sync tasks: guild_id -> Task
@@ -415,7 +415,7 @@ class LiveSessionManager:
         guild_id: int,
         callback: Callable[[], bool] | None,
     ) -> None:
-        """Register a probe that reports whether Discord is still playing audio.
+        """Register a probe that reports whether the voice channel is still playing audio.
 
         Context updates that arrive while buffered audio is still being played
         are deferred until playback settles so late text-side replies do not
@@ -494,8 +494,8 @@ class LiveSessionManager:
         """Start a Live API session for a guild's voice channel.
 
         Args:
-            guild_id: Discord guild ID (one session per guild).
-            channel_id: Discord voice channel ID.
+            guild_id: The session key (one session per server).
+            channel_id: The voice channel id.
             system_instruction: Full persona/system prompt text.
             tools: Optional function declarations for the Live API.
             attachment_context: Document text embedded in the system instruction.
@@ -575,10 +575,10 @@ class LiveSessionManager:
                 )
             ),
             # Disable server-side VAD and use manual activity_start/activity_end
-            # signals instead.  Discord stops sending RTP packets when users are
+            # signals instead.  Voice channels stop sending RTP packets when users are
             # silent, which freezes the server-side VAD clock and prevents it from
             # ever detecting the end of a turn.  Manual VAD gives us full control:
-            # we send activity_start when we first receive Discord audio and
+            # we send activity_start when we first receive audio and
             # activity_end after a configurable silence timeout.
             realtime_input_config=types.RealtimeInputConfig(
                 automatic_activity_detection=types.AutomaticActivityDetection(
@@ -976,7 +976,7 @@ class LiveSessionManager:
                 buf = self._send_buffers.get(guild_id)
                 if not buf:
                     idle_ticks += 1
-                    # Discord stops sending packets when the user stops talking.
+                    # The channel stops sending packets when the user stops talking.
                     # After a silence timeout, send activity_end so Gemini knows
                     # the user finished speaking and should respond.
                     if idle_ticks == _SILENCE_TICKS and state._user_speaking:
@@ -1059,7 +1059,7 @@ class LiveSessionManager:
         It runs at ``self.history_sync_interval`` seconds, queries
         ``chat_history_cache.load_chat_history_for_guild`` for any messages newer
         than the last-seen timestamp, sends each one into Gemini via
-        ``send_text`` and replicates it onto the ``discord_live_<guild>`` path
+        ``send_text`` and replicates it onto the ``live_<guild>`` path
         so that the live prompt will see the text history as if it had been
         uttered in voice.
         """
@@ -1100,7 +1100,7 @@ class LiveSessionManager:
                             )
                             # replicate to live history path
                             await save_chat_message(
-                                interface_path=f"discord_live_{guild_id}",
+                                interface_path=f"live_{guild_id}",
                                 message_text=text,
                                 sender_name=msg.get("sender_name"),
                                 sender_id=msg.get("sender_id"),
@@ -1233,7 +1233,7 @@ class LiveSessionManager:
         if not state or not state.is_active or not state._session:
             return
 
-        # Buffer while Gemini is generating or while Discord is still draining
+        # Buffer while Gemini is generating or while the channel is still draining
         # already-received audio. Injecting a late text-side reply during either
         # window can cause audible interruptions or skipped openings.
         if self._should_defer_context_update(guild_id, state):
@@ -2039,7 +2039,7 @@ class LiveSessionManager:
     ) -> bool:
         """Explicitly reconnect a session with a fresh system instruction.
 
-        Called by the Discord interface when it detects a session nearing timeout
+        Called by the interface when it detects a session nearing timeout
         or when persona/context has changed significantly.
         """
         state = self._sessions.get(guild_id)

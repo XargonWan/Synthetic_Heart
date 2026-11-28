@@ -235,7 +235,7 @@ async def save_chat_message(
                 # from text-side replies and multimodal annotations that happen
                 # outside the voice stream.
                 if (
-                    not interface_path.startswith("discord_live_")
+                    not interface_path.startswith("live_")
                     and not interface_path.startswith("grillo")
                     and not interface_path.startswith("ai_diary")
                     and not interface_path.startswith("diary")
@@ -558,7 +558,7 @@ async def load_global_chat_history_since(
 ) -> list[dict[str, Any]]:
     """Load recent global chat history excluding live-session paths.
 
-    Returns messages from all interfaces *except* ``discord_live_*`` paths
+    Returns messages from all interfaces *except* ``live_*`` paths
     (those are already replicated into the live session context).  The result
     is ordered chronologically (oldest first) and optionally filtered to
     messages newer than ``since``.
@@ -578,7 +578,7 @@ async def load_global_chat_history_since(
                 query = """
                     SELECT sender_name, sender_id, message_text, created_at, interface_path
                     FROM chat_history_cache
-                    WHERE interface_path NOT LIKE 'discord_live_%%'
+                    WHERE interface_path NOT LIKE 'live_%%'
                 """
                 params: list[Any] = []
                 if since:
@@ -629,7 +629,7 @@ async def load_chat_history_for_guild(
     since: str | None = None,
     limit: int = 100,
 ) -> deque:
-    """Load chat history for all interface paths belonging to a Discord guild.
+    """Load chat history for all interface paths belonging to a server (guild).
 
     This is used by the live sync feature to fetch *text* messages posted in
     the guild, regardless of channel. The returned messages are ordered
@@ -637,7 +637,7 @@ async def load_chat_history_for_guild(
     :func:`load_chat_history`.
 
     Args:
-        guild_id: Discord guild ID
+        guild_id: The server's id
         since: Optional ISO timestamp string. When provided, only messages
             newer than ``since`` are returned.
         limit: Maximum number of messages to retrieve.
@@ -654,7 +654,7 @@ async def load_chat_history_for_guild(
                     FROM chat_history_cache
                     WHERE interface_path LIKE %s
                 """
-                params: list[Any] = [f"discord_{guild_id}_%"]
+                params: list[Any] = [f"live_text_{guild_id}_%"]
                 if since:
                     query += "\n AND created_at > %s"
                     params.append(since)

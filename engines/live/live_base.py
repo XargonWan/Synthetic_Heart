@@ -68,7 +68,7 @@ class LiveSessionManager:
     - Schedule and cancel the auto-rejoin timer (1 min before MAX_SESSION_SECONDS).
     - Remain fully agnostic to *which* live engine is in use.
 
-    Interfaces (discord_interface) call activate_live_for_path / deactivate_live_for_path;
+    Interfaces call activate_live_for_path / deactivate_live_for_path;
     they do NOT handle timer logic themselves.
     """
 
@@ -82,7 +82,7 @@ class LiveSessionManager:
                 label="Auto Switch al Cortex Live",
                 description=(
                     "Quando attivo, Synth switcha automaticamente al Cortex Live"
-                    " durante sessioni vocali Discord."
+                    " durante sessioni vocali."
                 ),
                 value_type=bool,
                 group="live",
@@ -95,7 +95,7 @@ class LiveSessionManager:
                 True,
                 label="Solo Trainer può invitare in vocale",
                 description=(
-                    "Se attivo, Synth entra in chiamata vocale Discord solo su"
+                    "Se attivo, Synth entra in chiamata vocale solo su"
                     " invito del Trainer. Disattivare espone a consumo API illimitato."
                 ),
                 value_type=bool,

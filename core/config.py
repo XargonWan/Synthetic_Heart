@@ -380,7 +380,7 @@ LIVE_SYNC_CHAT_HISTORY = config_registry.get_var(
     True,
     label="Live Sync Chat History",
     description=(
-        "When enabled, text messages sent in Discord are forwarded into an "
+        "When enabled, text messages sent in the chat are forwarded into an "
         "active live voice session and the live prompt includes both the "
         "local live history and the global chat history across interfaces."
     ),
@@ -564,7 +564,7 @@ LIVE_AUDIO_MIN_RMS = config_registry.get_var(
     500,
     label="Live Audio Noise Gate (RMS)",
     description=(
-        "Minimum RMS amplitude required before a Discord audio packet is forwarded "
+        "Minimum RMS amplitude required before a voice audio packet is forwarded "
         "to the Live API. Packets below this threshold are silently discarded, "
         "preventing mic hiss / background noise from triggering activity_start and "
         "causing the model to transcribe garbage. Typical ambient noise sits around "

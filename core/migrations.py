@@ -1000,6 +1000,40 @@ async def _migrate_searxng_url() -> None:
             log_info("[migrations] SEARXNG_URL now points at the synth-searxng service")
 
 
+async def _migrate_live_history_paths() -> None:
+    """The history of a live voice session was stored under ``discord_live_<server>``;
+    it is ``live_<server>`` now (a live session belongs to no one interface)."""
+    from core.db import _get_db_type, get_conn_ctx
+
+    old, new = "discord_live_", "live_"
+    db_type = _get_db_type()
+    async with get_conn_ctx() as conn:
+        async with conn.cursor() as cur:
+            try:
+                if not await _table_exists(cur, "chat_history_cache", db_type):
+                    return
+                quote = '"' if db_type == "postgres" else "`"
+                column = f"{quote}interface_path{quote}"
+                # PostgreSQL cannot tell the type of a bare parameter inside CONCAT.
+                prefix = "%s::text" if db_type == "postgres" else "%s"
+                await cur.execute(
+                    f"UPDATE chat_history_cache SET {column} = "
+                    f"CONCAT({prefix}, SUBSTR({column}, %s)) "
+                    f"WHERE SUBSTR({column}, 1, %s) = %s",
+                    (new, len(old) + 1, len(old), old),
+                )
+            except Exception as exc:
+                log_warning(f"[migrations] Could not rename the live history paths: {exc}")
+                return
+            changed = getattr(cur, "rowcount", 0) or 0
+        if changed:
+            try:
+                await conn.commit()
+            except Exception:
+                pass
+            log_info(f"[migrations] Live history paths: {old}* -> {new}* ({changed} rows)")
+
+
 # Registry of startup migrations, applied in order. Each entry is
 # (name, coroutine-callable). Add new one-shot migrations here.
 _STARTUP_MIGRATIONS: list[tuple[str, Any]] = [
@@ -1016,6 +1050,7 @@ _STARTUP_MIGRATIONS: list[tuple[str, Any]] = [
     ("migrate_selenium_endpoint_name", _migrate_selenium_endpoint_name),
     ("migrate_matrix_chat_to_matrix", _migrate_matrix_chat_to_matrix),
     ("migrate_searxng_url", _migrate_searxng_url),
+    ("migrate_live_history_paths", _migrate_live_history_paths),
 ]
 
 

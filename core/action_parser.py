@@ -527,7 +527,7 @@ _NUMERIC_PARAM_FIELDS = {
 
 
 # Field names small/local models substitute for the required ``text`` field
-# on message_* actions (discord, matrix, reddit, x, ...). Order is
+# on message_* actions (matrix, reddit, x, ...). Order is
 # priority — first match wins if a model somehow emits more than one.
 _TEXT_FIELD_ALIASES = ("message_text", "content", "message", "reply", "speech", "body")
 
@@ -1422,7 +1422,7 @@ async def _dispatch_send_message(
             # pseudo-interface like "grillo" that was never registered via
             # register_interface) can never start working by retrying the
             # same action — unlike a real, registered interface (example_chat,
-            # discord_bot, matrix) failing on a bad chat_id/target, which
+            # telegram_bot, matrix) failing on a bad chat_id/target, which
             # fails later inside interface.send_message() itself and stays
             # correctable. Marking this unfixable stops the selective
             # correction loop (and the LLM-chain lock contention it causes)
@@ -3079,7 +3079,7 @@ async def _add_runtime_state_injections(injections: dict[str, Any]) -> dict[str,
     """Add what the persona should know about its own running state.
 
     * ``active_interfaces`` — the interfaces that are on right now, so it knows
-      it can reach (say) both ``example_chat`` and ``discord_bot``. Recomputed on
+      it can reach (say) both ``example_chat`` and ``telegram_bot``. Recomputed on
       every turn, hence it follows a runtime enable/disable with no restart.
       Only the ids are listed (a few tokens); the path formats are added on
       demand by ``plugins/recon/recon_interface_reference``.

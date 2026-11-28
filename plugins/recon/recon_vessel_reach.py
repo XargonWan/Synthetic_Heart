@@ -7,7 +7,7 @@ memories and the rolling "recent chats" block are suppressed so the persona
 concentrates on the game.
 
 Sometimes, though, an in-world request genuinely needs "reach outside the game"
-— e.g. a player asking SyntH about a Telegram/Discord conversation, the weather,
+— e.g. a player asking SyntH about a Telegram conversation, the weather,
 or anything that lives beyond the world. This recon plugin asks the recon LLM a
 single structural yes/no question and records the boolean answer on the context
 memory as ``vessel_needs_external_reach``.
@@ -103,7 +103,7 @@ class ReconVesselReachPlugin:
             "You are currently embodied inside a virtual/game world. By default "
             "you only perceive this world. Decide whether answering the current "
             "in-world message REQUIRES information from outside the game — for "
-            "example other chat interfaces (Telegram, Discord, …), the real-world "
+            "example other chat interfaces (Telegram, Matrix, …), the real-world "
             "weather, or any fact that does not exist inside this world. If the "
             "message can be handled entirely from what happens in the world, no "
             "external reach is needed. The value for this key MUST be an object "

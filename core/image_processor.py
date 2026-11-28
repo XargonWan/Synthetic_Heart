@@ -39,7 +39,7 @@ class ImageProcessor:
 
         Args:
             user_id: User ID
-            interface_name: Interface name (e.g., 'example_chat', 'discord_bot')
+            interface_name: Interface name (e.g., 'example_chat', 'telegram_bot')
             has_trigger: Whether the message contains trigger words/mentions
 
         Returns:

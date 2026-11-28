@@ -22,12 +22,11 @@ from core.json_utils import (
     redact_multimodal_for_logging,
     sanitize_for_json,
 )
-from core.image_processor import get_image_processor, process_image_message
+from core.image_processor import process_image_message
 from core.abstract_context import AbstractContext, AbstractUser, AbstractMessage
 from core.mention_utils import is_message_for_bot
 from core.config_manager import config_registry
 from core.multimodal_attachment import (
-    extract_multimodal_from_discord,
     get_mime_type,
     is_supported_type,
 )
@@ -2175,58 +2174,50 @@ async def _extract_multimodal_attachments(
     Args:
         bot: The bot instance (used for downloading files)
         message: The message object from the interface
-        interface_name: The interface identifier (e.g., 'discord_bot')
+        interface_name: The interface identifier
 
     Returns:
         List of attachment dicts with keys: {mime_type, data, filename}
     """
     try:
-        image_processor = get_image_processor()
+        # What an extension delivers: the attachments are files it saved for us
+        # (``path``, ``filename``, ``mime_type``); read them into the unified format.
+        attachments = []
+        if hasattr(message, "attachments"):
+            for attachment in getattr(message, "attachments") or []:
+                if not isinstance(attachment, dict):
+                    continue
 
-        if interface_name == "discord_bot":
-            return await extract_multimodal_from_discord(message, image_processor)
-        else:
-            # Generic fallback for other interfaces
-            log_debug(
-                f"[plugin_instance] No multimodal extractor for interface: {interface_name}"
-            )
+                mime_type = str(
+                    attachment.get("content_type")
+                    or attachment.get("mime_type")
+                    or ""
+                )
+                filename = (
+                    attachment.get("filename") or attachment.get("name") or ""
+                )
+                if not mime_type:
+                    mime_type = get_mime_type(attachment.get("path"), filename)
+                if not mime_type or not is_supported_type(mime_type):
+                    continue
 
-            attachments = []
-            if hasattr(message, "attachments"):
-                for attachment in getattr(message, "attachments") or []:
-                    if not isinstance(attachment, dict):
-                        continue
+                normalized = dict(attachment)
+                normalized["mime_type"] = mime_type
 
-                    mime_type = str(
-                        attachment.get("content_type")
-                        or attachment.get("mime_type")
-                        or ""
-                    )
-                    filename = (
-                        attachment.get("filename") or attachment.get("name") or ""
-                    )
-                    if not mime_type:
-                        mime_type = get_mime_type(attachment.get("path"), filename)
-                    if not mime_type or not is_supported_type(mime_type):
-                        continue
+                if "data" not in normalized and normalized.get("path"):
+                    try:
+                        path = Path(str(normalized["path"]))
+                        if path.exists() and path.is_file():
+                            normalized["data"] = base64.b64encode(
+                                path.read_bytes()
+                            ).decode("utf-8")
+                    except Exception as exc:
+                        log_warning(
+                            f"[plugin_instance] Failed to inline attachment data: {exc}"
+                        )
 
-                    normalized = dict(attachment)
-                    normalized["mime_type"] = mime_type
-
-                    if "data" not in normalized and normalized.get("path"):
-                        try:
-                            path = Path(str(normalized["path"]))
-                            if path.exists() and path.is_file():
-                                normalized["data"] = base64.b64encode(
-                                    path.read_bytes()
-                                ).decode("utf-8")
-                        except Exception as exc:
-                            log_warning(
-                                f"[plugin_instance] Failed to inline attachment data: {exc}"
-                            )
-
-                    attachments.append(normalized)
-            return attachments
+                attachments.append(normalized)
+        return attachments
     except Exception as e:
         log_warning(f"[plugin_instance] Failed to extract multimodal attachments: {e}")
         return []
