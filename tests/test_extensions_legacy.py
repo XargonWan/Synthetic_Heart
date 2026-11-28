@@ -26,6 +26,53 @@ def component(ext: str) -> Component:
     return next(c for c in COMPONENTS if c.extension_id == ext)
 
 
+class TestGeminiLive:
+    """Owning a Gemini key says nothing (the LLM engines use it): choosing a Live engine does."""
+
+    def test_a_key_alone_installs_nothing(self) -> None:
+        d = decide(component("official/gemini_live"), {"GEMINI_API_KEY": "k"})
+        assert not d.migrate and not d.install
+
+    @pytest.mark.parametrize("chosen", ["Default", "default", "None", "", "  "])
+    def test_a_selector_that_never_left_its_default_is_not_a_choice(
+        self, chosen: str
+    ) -> None:
+        d = decide(
+            component("official/gemini_live"),
+            {"GEMINI_API_KEY": "k", "LIVE_CORTEX": chosen},
+        )
+        assert not d.migrate and not d.install
+
+    def test_a_chosen_live_engine_fetches_the_extension_with_its_options(self) -> None:
+        d = decide(
+            component("official/gemini_live"),
+            {
+                "GEMINI_API_KEY": "k",
+                "LIVE_CORTEX": "gemini_live",
+                "LIVE_AFFECTIVE_DIALOG": "true",
+                "LIVE_THINKING_LEVEL": "low",
+                "LIVE_VOICE_NAME": "Puck",
+            },
+        )
+        assert d.migrate and d.install and not d.switch_off
+        assert d.settings == {
+            "GEMINI_API_KEY": "k",
+            "GEMINI_LIVE_AFFECTIVE_DIALOG": "true",
+            "GEMINI_LIVE_THINKING_LEVEL": "low",
+        }
+
+    def test_a_choice_without_a_key_never_worked(self) -> None:
+        d = decide(component("official/gemini_live"), {"LIVE_CORTEX": "gemini_live"})
+        assert not d.migrate
+
+    def test_the_old_keys_it_reads_are_listed(self) -> None:
+        from core.extensions.legacy import old_keys
+
+        assert {"GEMINI_API_KEY", "LIVE_CORTEX", "LIVE_THINKING_BUDGET"} <= set(
+            old_keys()
+        )
+
+
 class TestDecisions:
     def test_a_configured_interface_is_migrated_with_its_settings(self) -> None:
         d = decide(

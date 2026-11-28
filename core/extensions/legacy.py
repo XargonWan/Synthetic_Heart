@@ -41,6 +41,9 @@ class Component:
     settings: Mapping[str, str]
     #: Old keys that must hold a value for the component to have ever worked.
     required: tuple[str, ...] = ()
+    #: Old keys whose stored value means "never chosen" although it is there (a selector
+    #: that holds ``Default``): lowercase words, per key. Such a key counts as not set.
+    unset_values: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
     #: Old flags; any of them false means the operator switched it off.
     enabled_keys: tuple[str, ...] = ()
     #: Old flags that were **off unless set**: the component only ran if every one of them
@@ -102,6 +105,22 @@ COMPONENTS: tuple[Component, ...] = (
         },
         required=("DISCORD_BOT_TOKEN",),
         enabled_keys=("INTERFACE_ENABLED__discord_bot",),
+        default_package=False,
+    ),
+    # Gemini Live was an in-tree engine behind the Live selector. ``GEMINI_API_KEY`` alone says
+    # nothing (the LLM engines use it too): it counts as used when the operator **chose** a Live
+    # engine (``LIVE_CORTEX``), and then the engine of the same name is fetched with its options.
+    Component(
+        "official/gemini_live",
+        {
+            "GEMINI_API_KEY": "GEMINI_API_KEY",
+            "LIVE_AFFECTIVE_DIALOG": "GEMINI_LIVE_AFFECTIVE_DIALOG",
+            "LIVE_PROACTIVE_AUDIO": "GEMINI_LIVE_PROACTIVE_AUDIO",
+            "LIVE_THINKING_LEVEL": "GEMINI_LIVE_THINKING_LEVEL",
+            "LIVE_THINKING_BUDGET": "GEMINI_LIVE_THINKING_BUDGET",
+        },
+        required=("GEMINI_API_KEY", "LIVE_CORTEX"),
+        unset_values={"LIVE_CORTEX": ("default", "none")},
         default_package=False,
     ),
     Component(
@@ -214,7 +233,12 @@ def decide(component: Component, rows: Mapping[str, str]) -> Decision:
         (rows.get(key) or "").strip().lower() not in TRUE_WORDS
         for key in component.must_be_on
     )
-    configured = all(_has(rows.get(key)) for key in component.required)
+    configured = all(
+        _has(rows.get(key))
+        and (rows.get(key) or "").strip().lower()
+        not in component.unset_values.get(key, ())
+        for key in component.required
+    )
     if not configured:
         decision.reason = "its mandatory settings were never filled in: it never worked"
         return decision
