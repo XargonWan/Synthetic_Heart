@@ -282,12 +282,19 @@
             const response = await fetch('/api/turns/live');
             const data = await response.json();
             const cards = data && data.success ? data.turns : [];
+            // The cards are drawn again on every poll: keep what the person had scrolled
+            // (the blocks inside an open card, and the panel that holds them).
+            const blocks = Array.from(container.querySelectorAll('.tc-json')).map((n) => n.scrollTop);
+            const panel = container.closest('.sub-tab-panel');
+            const panelTop = panel ? panel.scrollTop : 0;
             container.hidden = !cards.length;
             container.textContent = '';
             if (cards.length) {
                 injectStyles();
                 container.appendChild(el('div', 'tc-group-title', 'Running now'));
                 renderCards(container.appendChild(el('div')), cards, '');
+                container.querySelectorAll('.tc-json').forEach((n, i) => { if (blocks[i]) n.scrollTop = blocks[i]; });
+                if (panel) panel.scrollTop = panelTop;
             }
         } catch (e) { container.hidden = true; }
     }

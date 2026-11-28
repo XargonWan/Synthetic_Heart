@@ -1219,12 +1219,19 @@ function _queueRenderIfChanged(el, html) {
     return true;
 }
 
+// What waits in the queue. The item the consumer is working on is not listed: it is the
+// live card under "Running now", and showing it twice only makes a visual duplicate.
+function _queueWaiting(data) {
+    const items = data && Array.isArray(data.items) ? data.items : [];
+    return items.filter((it) => !(it && it.status === 'processing'));
+}
+
 // Build the full inner markup for the queue content pane from a response.
 function _queueBuildHtml(data) {
     if (!(data && data.success)) {
         return '<div class="empty-state"><div class="icon">⚠️</div><p>Failed to load queue</p></div>';
     }
-    const items = Array.isArray(data.items) ? data.items : [];
+    const items = _queueWaiting(data);
     if (items.length === 0) {
         return '<div class="empty-state"><div class="icon">📥</div><p>Queue is empty</p></div>';
     }
@@ -1259,7 +1266,7 @@ async function loadHistoryQueue(silent) {
         const data = await response.json();
         historyState.queue.loaded = true;
         const html = _queueBuildHtml(data);
-        const populated = !!(data && data.success && Array.isArray(data.items) && data.items.length > 0);
+        const populated = !!(data && data.success && _queueWaiting(data).length > 0);
         _queueRenderIfChanged(content, html);
         content.classList.toggle('history-populated', populated);
     } catch (error) {

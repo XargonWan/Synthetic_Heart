@@ -5,7 +5,7 @@ const path = require('path');
 class Node {
     constructor(tag) {
         this.tagName = tag; this.children = []; this.className = ''; this._text = ''; this.dataset = {};
-        this.attrs = {}; this.listeners = {}; this.hidden = false; this.id = '';
+        this.attrs = {}; this.listeners = {}; this.hidden = false; this.id = ''; this.scrollTop = 0;
         const self = this;
         this.classList = {
             toggle(name, force) {
@@ -22,6 +22,9 @@ class Node {
     setAttribute(k, v) { this.attrs[k] = String(v); }
     addEventListener(t, f) { (this.listeners[t] = this.listeners[t] || []).push(f); }
     click() { (this.listeners.click || []).forEach((f) => f({})); }
+    // The two the page uses to keep a scroll position across a redraw (a real DOM has both).
+    querySelectorAll(sel) { const cls = sel.replace(/^\./, ''); return this.find((n) => n.className === cls); }
+    closest() { return null; }
     find(pred, out = []) { if (pred(this)) out.push(this); this.children.forEach((c) => c.find && c.find(pred, out)); return out; }
 }
 const ids = {};
@@ -93,7 +96,11 @@ out.stillOpen = !again.children[1].hidden;
     const list = new Node('div');
     await T.loadFinished(list, { status: 'failed', search: 'x y', limit: 5 });
     out.finishedCount = list.find((n) => n.tagName === 'article').length;
-    out.requested = fetched;
+    out.requested = fetched.slice();
+    // A redraw (the live cards are drawn again on every poll) keeps a scrolled block where it was.
+    holder.find((n) => n.className === 'tc-json')[0].scrollTop = 120;
+    await T.loadLive(holder);
+    out.scrollKept = holder.find((n) => n.className === 'tc-json')[0].scrollTop;
     const empty = new Node('div');
     global.fetch = async () => ({ json: async () => ({ success: true, turns: [] }) });
     await T.loadFinished(empty, {});

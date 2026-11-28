@@ -59,6 +59,49 @@ class TestTemplates:
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="node is not installed")
+class TestQueueView:
+    def test_the_queue_panel_scrolls_as_a_whole(self, client: TestClient) -> None:
+        # "Running now" sits above the list; an expanded card made the panel taller than its
+        # window and nothing scrolled it, because only the list below had a scrollbar.
+        html = client.get("/templates/history.html").text
+        assert "#subtab-queue { overflow-y: auto; }" in html
+        assert (
+            "#subtab-queue .history-container { flex: none; overflow: visible;" in html
+        )
+
+    def test_the_item_being_processed_is_not_listed_twice(self) -> None:
+        # It is the live card under "Running now"; the list holds what waits.
+        script = (
+            "const fs=require('fs');const src=fs.readFileSync(process.argv[1],'utf8');"
+            "const grab=(n)=>{const i=src.indexOf('function '+n);let d=0,j=src.indexOf('{',i);"
+            "for(;j<src.length;j++){if(src[j]=='{')d++;if(src[j]=='}'){d--;if(!d)break;}}"
+            "return src.slice(i,j+1)};"
+            "const ctx={renderQueueItem:(it)=>'['+it.text_preview+']',formatTimestamp:(x)=>x};"
+            "require('vm').runInNewContext(['_queueWaiting','_queueBuildHtml'].map(grab).join('\\n')"
+            "+'\\nthis.build=_queueBuildHtml;',ctx);"
+            "const run=(items)=>ctx.build({success:true,items});"
+            "console.log(JSON.stringify({"
+            "both:run([{status:'processing',text_preview:'now'},{status:'pending',text_preview:'next'}]),"
+            "only:run([{status:'processing',text_preview:'now'}])}));"
+        )
+        done = subprocess.run(
+            [
+                "node",
+                "-e",
+                script,
+                str(ROOT / "res" / "synth_webui" / "js" / "history.js"),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        assert done.returncode == 0, done.stderr
+        drawn = json.loads(done.stdout)
+        assert "[next]" in drawn["both"] and "[now]" not in drawn["both"]
+        assert "1 item(s) queued" in drawn["both"]
+        assert "Queue is empty" in drawn["only"] and "[now]" not in drawn["only"]
+
+
 class TestCardsScript:
     @pytest.fixture(scope="class")
     def drawn(self) -> dict:
@@ -118,6 +161,11 @@ class TestCardsScript:
         ]
         assert drawn["liveTitle"] == "Running now" and drawn["liveHidden"] is False
         assert drawn["finishedCount"] == 2
+
+    def test_a_redraw_keeps_a_block_scrolled_where_it_was(self, drawn: dict) -> None:
+        # The running cards are drawn again every few seconds: without this, whatever
+        # you scrolled inside an open card snapped back to the top.
+        assert drawn["scrollKept"] == 120
 
     def test_empty_and_failed_loads_say_so(self, drawn: dict) -> None:
         assert drawn["emptyText"].startswith("No turns yet")

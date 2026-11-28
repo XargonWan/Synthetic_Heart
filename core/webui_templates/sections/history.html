@@ -427,6 +427,14 @@
         display: none;
       }
 
+      /* Queue: "Running now" (live cards, which can be expanded and are tall) sits above the
+         list, so the whole panel scrolls, with the filters kept in view. Before, only the
+         list scrolled and an expanded card could not be reached with the mouse wheel. */
+      #subtab-queue { overflow-y: auto; }
+      #subtab-queue .section-controls { position: sticky; top: 0; z-index: 5; background: var(--bg); }
+      #subtab-queue .history-queue-live { flex: none; padding: 0 1rem; }
+      #subtab-queue .history-container { flex: none; overflow: visible; min-height: 0; }
+
       /* Visual highlight when content is populated to aid debugging */
       .history-container.history-populated {
         position: relative;
