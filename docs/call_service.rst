@@ -218,10 +218,12 @@ simple energy detector (logged once per call). Speech shorter than 0.6 s is igno
 the SyntH is not listened to while it speaks (nor for 0.5 s after).
 
 **The Live engine is optional and off by default.** ``CALL_LIVE_ENGINE_ENABLED`` (default
-off) is a call-wide switch: when it is on, a call whose interface has a Live
-implementation hands the conversation to a bidirectional Live engine (e.g. Gemini Live,
-which does its own speech recognition and voice) instead of the pipeline above. The route
-may be removed; nothing else depends on it. Today only Discord has a Live implementation.
+off) is a call-wide switch: when it is on, a call whose interface can play a stream
+(``stream=True`` in ``calls.provider``) hands the conversation to a bidirectional Live engine
+(e.g. Gemini Live, which does its own speech recognition and voice) instead of the pipeline
+above. The Core side is ``core/live_call_bridge.py``; the engine is any ``LiveEngineBase``,
+in the Core or provided by an extension (see :doc:`plugin_platform/extension_runtime`). A call
+falls back to the pipeline above when no engine is available or it refuses the session.
 
 Support per interface
 ---------------------
@@ -243,8 +245,11 @@ What an interface can do is set by the platform, not by this project. Checked on
    * - ``discord_bot``
      - yes
      - no
-     - A voice session is a call (``DiscordCallProvider``): the generic pipeline by default,
-       the Live engine only with ``CALL_LIVE_ENGINE_ENABLED``. Discord's API gives bots no
+     - A voice session is a call, hosted by the ``official/discord`` extension (the plugins
+       repository, ``extensions/discord/calls.py``) through the extension call API
+       (``core/extensions/calls.py``): the generic pipeline by default, a Live engine (for
+       example ``official/gemini_live``) with ``CALL_LIVE_ENGINE_ENABLED``, since the
+       extension announces ``stream=True``. Discord's API gives bots no
        camera or Go Live video; the libraries that stream video use a user token, which
        Discord's terms forbid. A video request degrades to audio.
    * - ``telegram`` (user account)

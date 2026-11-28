@@ -345,14 +345,16 @@ extension carries the sound and the picture:
      - Behaviour
    * - ``calls.provider``
      - Announce that a registered interface (with the ``call`` capability) hosts calls,
-       and whether it can carry video.
+       whether it can carry video, and whether it can play audio as it arrives
+       (``stream``, needed for Live mode).
    * - ``calls.open``
      - A call began. The Core opens the session; the tone that answers arrives as a
-       ``call.play`` request **before this returns**. Returns ``call_id``, ``kind`` and,
-       for video, ``{fps, width, height}``.
+       ``call.play`` request **before this returns**. Returns ``call_id``, ``kind``,
+       ``mode`` (``classic`` or ``live``) and, for video, ``{fps, width, height}``.
    * - ``calls.audio``
      - What the caller says: raw 16-bit PCM at any rate, mono or stereo, in chunks of
-       about 100 ms; the Core converts to 16 kHz mono and feeds the speech pipeline.
+       about 100 ms; the Core converts to 16 kHz mono and feeds the speech pipeline, or,
+       in Live mode, the Live engine.
    * - ``calls.video_frame``
      - The newest frame of the SyntH's face as planar I420 (at most 700,000 bytes; a
        bigger face means an audio call).
@@ -362,6 +364,11 @@ extension carries the sound and the picture:
      - Play this file into the call. The path is a private copy **deleted when the
        handler returns**, so the extension copies it if playback needs it. Returns the
        seconds it will take, which is how the Core knows the SyntH is speaking.
+   * - ``call.stream`` (Live mode)
+     - The model's voice: raw 16-bit mono PCM and its rate, in order. Queue each chunk
+       after the last and return at once.
+   * - ``call.flush`` (Live mode)
+     - The caller spoke over the model: drop every chunk queued but not yet played.
    * - ``call.ended``, ``call.video_lost``
      - The Core ended the call; the face is no longer available (the call goes on as
        audio).
@@ -369,6 +376,57 @@ extension carries the sound and the picture:
 An extension can only drive calls it opened; when it dies its calls end and the camera
 stops. Whether py-tgcalls works against a live Telegram call was **not** verified (see
 :doc:`telegram_extension`).
+
+**Live engines** (capability ``live.provider``, manifest ``provides.engines = ["live"]``;
+``core/extensions/live.py``, ``core/live_call_bridge.py``, SDK ``synth_sdk.live``). A Live
+engine is a full-duplex conversation with a model: sound in, sound out, tool calls,
+interruptions. It is not Auris plus Vox (that is the classic call path above). The Core
+owns the *conversation* and the extension owns the *model connection*: the Core opens a
+session with a neutral description (persona, tools, voice, language, resume handle) and the
+extension turns it into its provider's wire protocol.
+
+.. list-table::
+   :header-rows: 1
+   :widths: 28 72
+
+   * - API
+     - Behaviour
+   * - ``live.provider``
+     - Announce the engine: ``name`` (a lowercase identifier; a built-in engine's name is
+       refused), ``label``, the PCM rates, the longest session it can hold. It then appears
+       in the Live selector (``LIVE_CORTEX``) next to any in-tree engine.
+   * - ``live.event``
+     - Something the model did: ``audio`` (16-bit mono PCM, up to about 8 s a chunk; the
+       SDK coalesces to about 100 ms), ``transcript`` (``side`` ``input`` or ``output``),
+       ``tool_call``, ``turn_complete``, ``interrupted``, ``state`` (``connected``,
+       ``reconnecting``, ``closed``, with an optional ``resume_handle``) or ``error``. A late
+       event of a session the Core already closed is ignored (``accepted: false``).
+   * - ``live.open`` (Core to extension)
+     - A session: system instruction, tools as ``{name, description, parameters}`` (neutral:
+       turn them into the provider's declarations), voice, language, resume handle.
+       Refusing it (an error) leaves the call on the classic path.
+   * - ``live.audio`` (Core to extension)
+     - What the caller says: 16-bit mono PCM at 16 kHz. A notification.
+   * - ``live.text``, ``live.tool_result``, ``live.close``
+     - A line for the model (``kind`` ``context``: it should know; ``turn``: it should
+       answer), the outcome of a tool call, the end of the session.
+
+When ``CALL_LIVE_ENGINE_ENABLED`` is on, the interface announced ``stream`` and a Live engine
+resolves, ``calls.open`` answers ``mode: "live"`` and ``core.live_call_bridge`` holds the
+call: it feeds ``calls.audio`` to the engine, sends the model's voice back as ``call.stream``,
+runs tool calls through the action pipeline (an error is reported to the model, the call goes
+on), writes both sides of every turn to the chat history (``live_<path>``) and to memory, and
+a diary entry when the call ends. If the engine ends its stream or fails five times in a
+row the call is hung up; if the extension dies its calls end.
+
+``official/gemini_live`` (plugins repository) is the Gemini engine: it turns the neutral
+session into a Gemini Live socket, reconnects with Google's resumption handle (or restarts
+with the last exchanges as context) without the Core noticing, and tells the model when the
+caller starts and stops speaking for sources that send nothing during silence.
+
+What the model's voice does **not** do yet: drive the avatar's mouth. Karada takes audio as
+a file (``broadcast_audio``), not as a stream, so a Live call has no lip-sync (the removed
+in-tree Discord Live path had none either).
 
 Cost of the process boundary
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~

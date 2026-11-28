@@ -2,7 +2,7 @@ Remaining Work and Designs
 ==========================
 
 What the platform has **not** moved out of the Core yet, why, and the API each piece
-needs first. Status as of 2026-11-26. Nothing here is built.
+needs first. Status as of 2026-11-28.
 
 .. list-table::
    :header-rows: 1
@@ -12,29 +12,32 @@ needs first. Status as of 2026-11-26. Nothing here is built.
      - Why it is not done
      - What it needs first
    * - Discord
-     - **The extension exists** (``official/discord`` in the plugins repository, not a default,
-       experimental): text, threads, replies, files, reactions, typing, avatar, voice channels
-       and calls through ``calls.*`` (join and leave, hearing, speaking), with its tests. The
-       in-tree interface (``interface/discord_interface``, 4,400 lines) is **still there**: it
-       is the only host of the Gemini Live voice session, and nothing here has been run against
-       a real Discord server yet. Both register ``discord_bot``; the Core refuses the second, so
-       they cannot run together.
-     - To remove the in-tree one: (1) a run against a test bot and server by hand (text, thread,
-       DM, files, voice join/leave, a spoken call, ``/leave``); (2) a decision about Live voice
-       (the duplex API below, or Live waits); (3) the settings migration
-       (``core/extensions/legacy.py``: ``DISCORD_BOT_TOKEN``, ``DISCORD_BOT_USE_SYNTH_AVATAR``,
-       not a default package); (4) the Core's Discord names removed (about 170 lines in 40
-       files, the largest in ``multimodal_attachment``, ``live_session_manager``,
-       ``message_plugin``, ``prompt_engine``, ``interface_path_utils``, ``chat_history_cache``,
-       ``delivery_guard``) and the 39 test files that name it rewritten around a stand-in
-       interface.
+     - **Done in the Core**: the in-tree interface and the Core's Discord names are gone;
+       ``official/discord`` (plugins repository, not a default) replaces it, and the settings
+       migration carries it over. Nothing has been run against a real Discord server.
+     - A run against a test bot and server by hand (text, thread, DM, files, voice
+       join/leave, a spoken call, ``/leave``), then Gemini Live voice in a channel (the
+       extension announces ``stream=True`` and plays ``call.stream`` / drops it on
+       ``call.flush``; tested against fakes only).
    * - Live engines
-     - The session manager builds Gemini objects (``LiveConnectConfig``) in the Core.
-       A Live session is a full-duplex model conversation, not Auris plus Vox (the
-       classic call path, which already runs on those engines).
-     - A duplex audio streaming API next to ``calls.*`` (chunks in and out, interruption,
-       tool calls) and a provider-neutral session configuration that the extension turns
-       into its provider's own.
+     - **The API and the engine exist** (``live.*``, ``mode: "live"`` calls,
+       ``synth_sdk.live``; see :doc:`extension_runtime`; ``official/gemini_live`` in the
+       plugins repository, not a default): the model connection, tool declarations,
+       reconnection with session resumption and go-away, manual speech detection. The Core's
+       ``LiveCallBridge`` holds the call, and ``memory_search`` and ``chat_history_cache``
+       already talk to it. **Nothing has been run against the real Gemini Live API**: the
+       engine is tested against a fake connection only. The in-tree manager
+       (``core/live_session_manager.py``, 2,000 lines) is still there, with
+       ``plugins/live_engines/gemini.py`` and ``engines/live/``: nothing calls it any more.
+     - A run by hand against Gemini with a test key (a call that hears, answers, calls a
+       tool, is interrupted, survives the ten-minute reconnect), then delete the in-tree
+       manager in a commit of its own (see ``CLAUDE.md``: leave the hash where the code
+       was). The settings migration is done (``core/extensions/legacy.py``): the extension is
+       fetched, with ``GEMINI_API_KEY`` and the ``LIVE_*`` options, only when a Live engine was
+       **chosen** (``LIVE_CORTEX``), because the key alone also serves the LLM engines. Not carried over from
+       the old manager: syncing the chat into the model while a call runs (only new
+       messages are forwarded), deferring context while the *interface* is still playing
+       (only while the model is still generating), the avatar's mouth.
    * - Rift Vessel adapters (M8b)
      - The connector API and the Karada API for extensions exist (``provides.vessels``,
        ``karada.subscribe``/``karada.presence``). Reading RetroXR for the move found what is
