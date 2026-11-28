@@ -52,22 +52,22 @@ async def test_live_search_returns_quickly_and_sends(monkeypatch):
 
     sent = []
 
-    class FakeMgr:
-        def is_session_active(self, gid):
-            return True
+    class FakeBridge:
+        history_path = "live_chat_42"
 
-        async def send_text(self, gid, text):
-            sent.append((gid, text))
+        async def tell(self, text, kind="context"):
+            sent.append((kind, text))
 
-    monkeypatch.setattr(
-        "core.live_session_manager.LiveSessionManager.get_instance",
-        lambda: FakeMgr(),
-    )
+    class FakeCalls:
+        def by_history_path(self, path):
+            return FakeBridge() if path == "live_chat_42" else None
+
+    monkeypatch.setattr("core.live_call_bridge.get_live_calls", lambda: FakeCalls())
 
     plugin = MemorySearchPlugin()
     action = {"payload": {"mode": "tags", "tags": ["foo"]}}
     ctx = {"interface": "discord"}
-    orig_msg = SimpleNamespace(interface_path="live_123", chat_id=None)
+    orig_msg = SimpleNamespace(interface_path="live_chat_42", chat_id=None)
 
     res = await plugin.execute_action(action, ctx, None, orig_msg)
     assert res.get("processed") is True
@@ -76,4 +76,4 @@ async def test_live_search_returns_quickly_and_sends(monkeypatch):
 
     # give background task a tick to run
     await asyncio.sleep(0)
-    assert sent == [(123, "[2026-01-01T00:00:00] remembered content")]
+    assert sent == [("context", "[2026-01-01T00:00:00] remembered content")]

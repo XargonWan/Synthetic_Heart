@@ -14,16 +14,17 @@ async def test_save_chat_message_triggers_live_context(monkeypatch):
     # prepare dummy manager that records calls
     calls = []
 
-    class DummyMgr:
-        def get_active_sessions(self):
+    class DummyCalls:
+        def active(self):
             return [111, 222]
 
-        async def send_context_update(self, gid, text):
-            calls.append((gid, text))
+        async def tell_all(self, text):
+            for gid in self.active():
+                calls.append((gid, text))
 
-    dummy_mgr = DummyMgr()
+    dummy_mgr = DummyCalls()
     monkeypatch.setattr(
-        "core.live_session_manager.LiveSessionManager.get_instance",
+        "core.live_call_bridge.get_live_calls",
         lambda: dummy_mgr,
     )
 
@@ -75,16 +76,17 @@ async def test_save_chat_message_skips_live_path(monkeypatch):
     """Messages from live_* should not trigger context updates."""
     calls = []
 
-    class DummyMgr:
-        def get_active_sessions(self):
+    class DummyCalls:
+        def active(self):
             return [1]
 
-        async def send_context_update(self, gid, text):
-            calls.append((gid, text))
+        async def tell_all(self, text):
+            for gid in self.active():
+                calls.append((gid, text))
 
     monkeypatch.setattr(
-        "core.live_session_manager.LiveSessionManager.get_instance",
-        lambda: DummyMgr(),
+        "core.live_call_bridge.get_live_calls",
+        lambda: DummyCalls(),
     )
 
     # stub database context to avoid real DB operations
@@ -134,16 +136,17 @@ async def test_save_chat_message_forwards_self_reply_to_live(monkeypatch):
 
     calls = []
 
-    class DummyMgr:
-        def get_active_sessions(self):
+    class DummyCalls:
+        def active(self):
             return [7]
 
-        async def send_context_update(self, gid, text):
-            calls.append((gid, text))
+        async def tell_all(self, text):
+            for gid in self.active():
+                calls.append((gid, text))
 
-    dummy_mgr = DummyMgr()
+    dummy_mgr = DummyCalls()
     monkeypatch.setattr(
-        "core.live_session_manager.LiveSessionManager.get_instance",
+        "core.live_call_bridge.get_live_calls",
         lambda: dummy_mgr,
     )
 

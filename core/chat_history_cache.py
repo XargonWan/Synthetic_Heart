@@ -242,16 +242,10 @@ async def save_chat_message(
                     and sender_name != "grillo"
                 ):
                     try:
-                        from core.live_session_manager import LiveSessionManager
+                        from core.live_call_bridge import get_live_calls
 
-                        try:
-                            mgr = LiveSessionManager.get_instance()
-                        except Exception:
-                            mgr = LiveSessionManager._instance
-                        if not mgr:
-                            # no live manager has been created yet, nothing to do
-                            pass
-                        else:
+                        calls = get_live_calls()
+                        if calls.active():
                             if sender_name == "self":
                                 context_text = (
                                     f"[assistant reply template synced from {interface_path}] "
@@ -262,10 +256,7 @@ async def save_chat_message(
                                 )
                             else:
                                 context_text = f"[context update from {interface_path}] {message_text}"
-                            for gid in mgr.get_active_sessions():
-                                asyncio.create_task(
-                                    mgr.send_context_update(gid, context_text)
-                                )
+                            asyncio.create_task(calls.tell_all(context_text))
                     except Exception as e:
                         log_debug(
                             f"[chat_history_cache] live context update failed: {e}"

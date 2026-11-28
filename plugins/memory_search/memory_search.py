@@ -540,13 +540,13 @@ class MemorySearchPlugin:
         return union_q, final_params
 
     async def _live_search(
-        self, payload: Dict[str, Any], guild_id: int, original_message
+        self, payload: Dict[str, Any], history_path: str, original_message
     ) -> None:
         """Perform a memory search and send formatted results to a live session.
 
         This helper mirrors much of :meth:`execute_action` but instead of
-        issuing an LLM delivery it sends a plain text summary back into the
-        live voice session via ``LiveSessionManager.send_text``.  It is
+        issuing an LLM delivery it gives a plain text summary to the call
+        that holds the conversation (``LiveCallBridge.tell``).  It is
         intentionally fire-and-forget (used via ``asyncio.create_task``).
         """
         # mimic execute_action's result-building part but no LLM delivery
@@ -596,10 +596,11 @@ class MemorySearchPlugin:
             final_text = "\n".join(text_lines)
 
             try:
-                from core.live_session_manager import LiveSessionManager
+                from core.live_call_bridge import get_live_calls
 
-                mgr = LiveSessionManager.get_instance()
-                await mgr.send_text(guild_id, final_text)
+                bridge = get_live_calls().by_history_path(history_path)
+                if bridge is not None:
+                    await bridge.tell(final_text, "context")
             except Exception as e:
                 log_warning(f"[memory_search] live send_text failed: {e}")
         except Exception as e:
@@ -626,19 +627,12 @@ class MemorySearchPlugin:
 
         # the new async live search path
         interface_path = getattr(original_message, "interface_path", "")
-        if isinstance(interface_path, str) and interface_path.startswith(
-            "live_"
-        ):
-            # extract guild id from path
-            try:
-                guild_id = int(interface_path.split("_")[1])
-            except Exception:
-                guild_id = None
-            if guild_id is not None:
-                asyncio.create_task(
-                    self._live_search(payload, guild_id, original_message)
-                )
-                return {"processed": True, "results": [], "async": True}
+        if isinstance(interface_path, str) and interface_path.startswith("live_"):
+            # A Live call: the answer is spoken into it, not delivered as a new turn.
+            asyncio.create_task(
+                self._live_search(payload, interface_path, original_message)
+            )
+            return {"processed": True, "results": [], "async": True}
 
         # Determine max results
         default_max = int(
