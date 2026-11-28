@@ -4,7 +4,9 @@
 
 **The official repository** is no longer baked into the image: it is a built-in, non-removable repository of the extension runtime (pinned address and key, release `latest-develop`, `SYNTH_OFFICIAL_CHANNEL` for another). The defaults are downloaded and installed at the first start; with no network the step is retried at each start. The Repositories tab shows it as *built in*.
 
-**SearXNG** leaves the image: `docker-compose.yml` runs it as `synth-searxng` (`searxng/searxng`, configuration inline) and the web_search plugin's `SEARXNG_URL` defaults to `http://synth-searxng:8080`. A stored `http://127.0.0.1:8888` has to be changed.
+**SearXNG** leaves the image: `docker-compose.yml` runs it as `synth-searxng` (`searxng/searxng`, configuration inline) and the web_search plugin's `SEARXNG_URL` defaults to `http://synth-searxng:8080`; a stored `http://127.0.0.1:8888` is moved by a startup migration.
+
+**Nothing for an existing installation to do.** Extensions installed from the old baked-in repository are recorded as coming from the official one (so they update from it); the Minecraft Vessel downloads Node.js into the data volume the first time it needs it (`interface/node_runtime.py`, pinned version and SHA-256; a hash mismatch is refused). Only a *fresh* installation needs the network at its first start, to download the default extensions.
 
 **Removed** (find them with `git log --diff-filter=D -- scripts/build_bundled_extensions.py container/s6-services container/searxng`): `scripts/build_bundled_extensions.py`, `tests/test_stage_bundle.py`, the S6 services and the in-container SearXNG settings.
 

@@ -24,8 +24,9 @@ First start and migration
 #. Rebuild the Docker image. It carries no extension: the first start downloads the defaults
    from the official repository, so it needs the network and a published release
    (``latest-develop``).
-#. SearXNG is its own container now (``synth-searxng``); a stored ``SEARXNG_URL`` of
-   ``http://127.0.0.1:8888`` must be changed to ``http://synth-searxng:8080``.
+#. SearXNG is its own container now (``synth-searxng``, started by ``docker compose up``);
+   a stored ``SEARXNG_URL`` of ``http://127.0.0.1:8888`` is moved to it by a startup
+   migration. Check Minecraft's first start downloads Node into ``/config/node``.
 #. Zen: no endpoint is seeded by the Core; the Zen extension registers its own, and an
    installation with no endpoint at all shows the explicit "no cortex" message.
 

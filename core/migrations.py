@@ -971,6 +971,35 @@ async def _migrate_selenium_endpoint_name() -> None:
         log_info("[migrations] Renamed endpoint selenium-llm-engine -> zen-llm-engine")
 
 
+async def _migrate_searxng_url() -> None:
+    """SearXNG used to run inside the image, on ``127.0.0.1:8888``. It is the
+    ``synth-searxng`` compose service now (``synth-searxng:8080``): a stored default of the
+    old address follows it. Any other value is the operator's own and is left alone."""
+    from core.db import get_conn_ctx
+
+    old = ("http://127.0.0.1:8888", "http://localhost:8888", "http://127.0.0.1:8888/")
+    async with get_conn_ctx() as conn:
+        async with conn.cursor() as cur:
+            try:
+                await cur.execute(
+                    "UPDATE config SET value = %s "
+                    "WHERE config_key = 'SEARXNG_URL' AND value IN (%s, %s, %s)",
+                    ("http://synth-searxng:8080", *old),
+                )
+            except Exception as exc:
+                log_warning(
+                    f"[migrations] Could not move SEARXNG_URL to the compose service: {exc}"
+                )
+                return
+            changed = getattr(cur, "rowcount", 0) or 0
+        if changed:
+            try:
+                await conn.commit()
+            except Exception:
+                pass
+            log_info("[migrations] SEARXNG_URL now points at the synth-searxng service")
+
+
 # Registry of startup migrations, applied in order. Each entry is
 # (name, coroutine-callable). Add new one-shot migrations here.
 _STARTUP_MIGRATIONS: list[tuple[str, Any]] = [
@@ -986,6 +1015,7 @@ _STARTUP_MIGRATIONS: list[tuple[str, Any]] = [
     ("migrate_ollama_serve_to_openai_api", _migrate_ollama_serve_to_openai_api),
     ("migrate_selenium_endpoint_name", _migrate_selenium_endpoint_name),
     ("migrate_matrix_chat_to_matrix", _migrate_matrix_chat_to_matrix),
+    ("migrate_searxng_url", _migrate_searxng_url),
 ]
 
 

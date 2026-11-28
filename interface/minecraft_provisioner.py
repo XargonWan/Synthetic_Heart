@@ -19,9 +19,9 @@ Design constraints (see ``docs/rift_vessel.rst`` and issue #60):
 * **Non-root.** The subprocess inherits the current (non-root) user; we never
   escalate privileges.
 * **Single-container PoC.** The bridge runs inside the same container as SyntH.
-  Node LTS is provisioned conditionally (see the Dockerfile Node stage). If
-  ``node``/``npm`` are missing the provisioner returns a clear error instead of
-  crashing.
+  The image has no Node: :mod:`interface.node_runtime` fetches a pinned official
+  build into the data volume when it is missing. If that fails the provisioner
+  returns a clear error instead of crashing.
 * **Cross-platform-guarded.** Linux-container-first; process control uses
   ``asyncio.create_subprocess_exec`` and POSIX signals, with a Windows fallback
   only where trivially safe.
@@ -44,6 +44,7 @@ from typing import Any, Dict
 
 from core.config_manager import config_registry
 from core.logging_utils import log_error, log_info, log_warning
+from interface import node_runtime
 
 LOG_PREFIX = "[minecraft_provisioner]"
 
@@ -596,16 +597,11 @@ class BridgeProvisioner:
                 "detail": "minecraft_vessel plugin is disabled (enable it in the WebUI)",
             }
 
-        npm = shutil.which("npm")
-        node = shutil.which("node")
+        # The image carries no Node.js: it is fetched into the data volume the first time
+        # the Vessel needs it (interface/node_runtime.py).
+        node, npm, why = await node_runtime.ensure_node()
         if not node or not npm:
-            return {
-                "ok": False,
-                "detail": (
-                    "node/npm not found in PATH — the runtime image needs the "
-                    "conditional Node stage enabled for the Minecraft Vessel"
-                ),
-            }
+            return {"ok": False, "detail": why}
 
         src = self._bridge_src()
         if not src.exists():
@@ -690,6 +686,7 @@ class BridgeProvisioner:
             "--no-fund",
             *_BRIDGE_NPM_DEPS,
             cwd=str(self._bridge_root),
+            env=node_runtime.environment_for(node),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
         )
@@ -760,9 +757,9 @@ class BridgeProvisioner:
             # Reap it so we relaunch a healthy one.
             await self._reap_orphan_bridge()
 
-        node = shutil.which("node")
+        node, _, why = await node_runtime.ensure_node()
         if not node:
-            return {"ok": False, "detail": "node not found in PATH"}
+            return {"ok": False, "detail": why}
 
         # Ensure the bridge is fully provisioned before launch. Previously
         # install() ran only when the *script* was missing, so a runtime with

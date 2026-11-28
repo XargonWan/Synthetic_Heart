@@ -19,6 +19,8 @@ from typing import Any
 
 from core.extensions.manifest import EXTENSION_ID_RE
 
+#: What the image's own repository was called (see ``builtin_repositories``).
+_BAKED_IN_NAME = "bundled"
 _NAME = re.compile(r"^[a-z0-9][a-z0-9_.-]{0,39}$")
 
 
@@ -215,9 +217,14 @@ class StateStore:
         for ext_id, record in (raw.get("extensions") or {}).items():
             if isinstance(record, dict) and EXTENSION_ID_RE.match(str(ext_id)):
                 try:
-                    state.extensions[ext_id] = InstalledRecord(**record)
+                    installed = InstalledRecord(**record)
                 except TypeError:
                     continue
+                if installed.repo == _BAKED_IN_NAME:
+                    # Installed from the repository the image used to carry: the same
+                    # extensions come from the official repository now.
+                    installed.repo = OFFICIAL_NAME
+                state.extensions[ext_id] = installed
         state.defaults_done = bool(raw.get("defaults_done"))
         state.legacy_done = bool(raw.get("legacy_done"))
         state.declined = [d for d in raw.get("declined", []) if isinstance(d, str)]

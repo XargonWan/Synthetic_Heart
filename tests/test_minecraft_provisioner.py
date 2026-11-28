@@ -148,9 +148,12 @@ async def test_start_reports_missing_node(
 ) -> None:
     prov = _make_prov(tmp_path)
     _mock_config(monkeypatch, {"PLUGIN_ENABLED__minecraft": True})
-    monkeypatch.setattr(
-        "interface.minecraft_provisioner.shutil.which", lambda name: None
-    )
+
+    async def no_node() -> tuple[None, None, str]:
+        return None, None, "could not fetch Node.js v22: URLError: offline"
+
+    # The provisioner fetches Node when it is missing: here that fetch fails.
+    monkeypatch.setattr("interface.node_runtime.ensure_node", no_node)
     res = await prov.start()
     assert res["ok"] is False
     assert "node" in res["detail"].lower()

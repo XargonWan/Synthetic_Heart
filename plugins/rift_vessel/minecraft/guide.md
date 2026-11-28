@@ -75,11 +75,12 @@ Without a skin plugin the bot keeps the default skin. See *Skin* below.
 
 The Node.js **Mineflayer bridge** needs Node to run.
 
-- **Docker (default deployment):** Node is **baked into the image** — the
-  Minecraft Vessel works out of the box, no extra build flags needed.
-- **Non-Docker / bare-metal:** install Node.js (LTS, v22+) yourself. To build a
-  deliberately node-free Docker image (e.g. when you don't need the Vessel),
-  opt out with `docker build --build-arg INSTALL_NODE=false …`.
+- **Docker (default deployment):** the image carries no Node. The first time
+  the Vessel needs it, SyntH downloads the official Node.js build into the data
+  volume (`/config/node`, pinned version and SHA-256, a few seconds) and uses it
+  from then on. Nothing to do.
+- **Non-Docker / bare-metal:** a Node.js on the PATH is used; without one, the
+  same download happens on Linux. Elsewhere install Node.js (LTS, v22+) yourself.
 
 The provisioner runs the bridge as a **non-root** subprocess and returns a
 clear error if `node` / `npm` are missing.

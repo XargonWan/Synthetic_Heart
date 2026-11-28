@@ -425,14 +425,11 @@ The bridge is a small Node.js process (Mineflayer) exposing a local HTTP API:
 ``BridgeProvisioner`` manages its lifecycle as a **non-root** subprocess inside
 the same container (single-container), gated by the Minecraft Vessel plugin's
 enable toggle (``PLUGIN_ENABLED__minecraft``).
-Node.js is **baked into the Docker image by default** (``INSTALL_NODE=true``),
-so the Minecraft Vessel works out of the box in Docker. Only non-Docker /
-bare-metal deployments need to install Node themselves; a node-free image can be
-built explicitly with:
-
-.. code-block:: bash
-
-    docker build --build-arg INSTALL_NODE=false -t synth:slim .
+The Docker image carries **no Node.js**. When the Vessel needs it and ``node`` is not on the
+PATH, ``interface/node_runtime.py`` downloads the pinned official build (version and SHA-256 in
+the source; Linux x64 and arm64) into the data volume (``<data>/node/``, ``/config/node`` in
+Docker) and uses it from then on; a download that does not match the pinned hash is refused.
+A Node.js already on the PATH is used as it is. On other platforms install Node yourself.
 
 The offline auth mode (``MC_AUTH=offline``) is used; real
 Microsoft/XBL auth and multiplayer sync are out of scope.
