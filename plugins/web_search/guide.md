@@ -31,17 +31,17 @@ plugin (which exposes the `search_current_knowledge` action).
 | `TAVILY_API_KEY` | API key enabling the Tavily fallback. |
 | `RECON_MAX_RESULTS` / `RECON_TIMEOUT` | Result cap and timeout for searches. |
 
-For the best results configure `SEARXNG_URL` (the Docker image ships a SearXNG
-instance on `127.0.0.1:8888`) or a `TAVILY_API_KEY`. With neither, searches fall
+For the best results configure `SEARXNG_URL` (the compose file runs a SearXNG
+container, `synth-searxng`, which is the default `http://synth-searxng:8080`) or a `TAVILY_API_KEY`. With neither, searches fall
 back to the keyless Wikipedia/Hacker News APIs, which cover encyclopedic facts
 and technology/current-event discussion but are not a general web index.
 
 ## Native Windows runtimes
 
-The Docker image bakes SearXNG in-container, but a native Windows runtime (uv on
-bare metal) has no container. Run the provisioner once to install and start a
-local SearXNG on `127.0.0.1:8888` — the default `SEARXNG_URL` then works with no
-config change:
+Docker runs SearXNG as its own container (`synth-searxng`), but a native Windows
+runtime (uv on bare metal) has no container. Run the provisioner once to install
+and start a local SearXNG on `127.0.0.1:8888`, then set `SEARXNG_URL` to
+`http://127.0.0.1:8888`:
 
 ```powershell
 .\scripts\searxng_windows.ps1 install          # clone + install + start

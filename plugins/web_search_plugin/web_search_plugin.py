@@ -31,7 +31,7 @@ try:
     register_exposed_var(
         "SEARXNG_URL",
         label="SearXNG URL",
-        default="http://127.0.0.1:8888",
+        default="http://synth-searxng:8080",
         value_type=str,
         description=(
             "Base URL of the SearXNG instance used as the preferred search "
@@ -58,7 +58,7 @@ TAVILY_API_KEY = config_registry.get_var(
 
 SEARXNG_URL = config_registry.get_var(
     "SEARXNG_URL",
-    "http://127.0.0.1:8888",
+    "http://synth-searxng:8080",
     label="SearXNG URL",
     description="Base URL of the self-hosted SearXNG search backend.",
     value_type=str,

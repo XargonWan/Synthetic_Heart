@@ -468,10 +468,9 @@ only through the JSON-RPC gateway in `core/extensions/`. The hard rules (details
   GitHub `XargonWan/synthetic-heart-official-plugins`, branch `develop`), one folder each,
   `extensions/<name>/` (`synth-extension.toml`, `ext_main.py`), with their tests in its
   `ext_tests/` (run against this checkout, see its README). Here: SDK in `synth_sdk/`, the
-  platform in `core/extensions/`, image bundling in `scripts/build_bundled_extensions.py`
-  (the Dockerfile clones the plugins repository), and the platform's own tests in
+  platform in `core/extensions/`, and the platform's own tests in
   `tests/test_extensions_*.py` (they use stand-in extensions, never the official ones).
-- The platform is **on by default** (`EXTENSIONS_ENABLED`). The defaults baked into the image (`default_install` in `extensions_bundled/`) are installed on, granted what they declare, at the first start; anything else is granted only by the operator.
+- The platform is **on by default** (`EXTENSIONS_ENABLED`). The image carries **no extension**: the **official repository** is a built-in, non-removable repository of the runtime (`core/extensions/repo/config.py`, pinned address and key, channel `SYNTH_OFFICIAL_CHANNEL`), and its `default_install` extensions are downloaded, switched on and granted what they declare at the first start (needs the network; retried at each start until it works); anything else is granted only by the operator. Services that belong to one plugin (Zen, SearXNG) are their own containers in `docker-compose.yml`, never part of the image.
 
 ## 6. Interfaces
 

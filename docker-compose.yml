@@ -125,6 +125,47 @@ services:
     networks:
       - synth_network
 
+  # SearXNG, the private search engine of the web_search plugin (its SEARXNG_URL setting
+  # points here). Reachable only on the Docker network; remove it if you use Tavily or
+  # your own SearXNG instead.
+  synth-searxng:
+    image: searxng/searxng:latest
+    container_name: synth-searxng
+    hostname: synth-searxng
+    environment:
+      - TZ=${TZ:-Asia/Tokyo}
+      - SEARXNG_SECRET=${SEARXNG_SECRET:-synth-searxng-private-instance}
+    configs:
+      - source: searxng_settings
+        target: /etc/searxng/settings.yml
+    restart: unless-stopped
+    networks:
+      - synth_network
+
+configs:
+  # Minimal configuration: the JSON API on (the plugin asks for format=json), no rate
+  # limiter (it would need valkey), nothing public.
+  searxng_settings:
+    content: |
+      use_default_settings: true
+      general:
+        instance_name: "SyntH SearXNG"
+        privacypolicy_url: false
+        contact_url: false
+      server:
+        limiter: false
+        public_instance: false
+        image_proxy: false
+        method: "GET"
+      search:
+        formats: [html, json]
+        safe_search: 0
+        autocomplete: ""
+        default_lang: "auto"
+      outgoing:
+        request_timeout: 5.0
+        max_request_timeout: 10.0
+
 volumes:
   synth_db_data:
   synth_pg_data:

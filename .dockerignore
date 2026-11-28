@@ -19,3 +19,23 @@ skins/Rekku
 skins/temp
 node_modules/
 *.vroid
+
+# Not part of the running image
+.git
+.gitnexus/
+.gitnexus-home/
+.synth-ab/
+.claude/
+.github/
+.mcp.json
+.ruff_cache/
+.pytest_cache/
+*.egg-info/
+docs/
+data/
+tmp/
+tmp_tts/
+website/
+webtop/
+frontend/
+TODO*.md

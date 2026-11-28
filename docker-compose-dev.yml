@@ -5,12 +5,13 @@
 #
 #   docker compose -f docker-compose.yml -f docker-compose-dev.yml up -d --build
 #
-#   synth                 -> built from this checkout (.), with the official extensions
-#                            from ../synthetic-heart-official-plugins
+#   synth                 -> built from this checkout (.)
 #   synth-zen-llm-engine  -> built from ../zen-llm-engine (sibling checkout)
 #
 # Everything else (ports, volumes, env, database) is inherited unchanged from
-# docker-compose.yml. The images get local tags so the build never overwrites
+# docker-compose.yml. The official extensions are not in the image: they come from the
+# official repository at the first start (to try one that is not published yet, add its
+# folder as a local repository; see the plugins repository's README). The images get local tags so the build never overwrites
 # the published xargonwan/* images you may have pulled.
 services:
   synth:
@@ -18,9 +19,6 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-      # The official extensions come from the sibling checkout, pushed or not.
-      additional_contexts:
-        plugins: ../synthetic-heart-official-plugins
 
   synth-zen-llm-engine:
     image: zen-llm-engine:dev

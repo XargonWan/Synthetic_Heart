@@ -93,15 +93,12 @@ Docker build
 ~~~~~~~~~~~~~
 
 The Dockerfile builds Stage automatically as part of the image build, so no
-manual ``pnpm build`` step is needed for containerized deployments. A dedicated
-``node:22-slim`` build stage (``stage_builder``) runs ``pnpm install
---frozen-lockfile`` and ``pnpm build``, then the resulting ``dist/`` is copied
-into the runtime image at ``/app/<plugins repo>/extensions/synth_stage/web``, and
-``scripts/build_bundled_extensions.py`` packs the default extensions (Stage
-included) into ``/app/extensions_bundled``, the repository the first start installs
-them from. The Node/pnpm toolchain stays in the build stage and never bloats the final
-Python image. After ``docker compose up -d --build`` and granting the extension, look
-for ``serving the Stage client at /stage/`` in the extension's log lines.
+manual ``pnpm build`` step is needed for containerized deployments. The Core's image does not
+build the Stage client any more: it is an extension, so the plugins repository builds it
+(``scripts/build_stage_extension.sh``, called by that repository's release build) and
+publishes it with the other extensions. The first start downloads it with the defaults. After
+``docker compose up -d --build`` and granting the extension, look for ``serving the Stage
+client at /stage/`` in the extension's log lines.
 
 URL flags
 ~~~~~~~~~

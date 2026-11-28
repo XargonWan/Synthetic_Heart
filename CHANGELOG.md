@@ -1,3 +1,15 @@
+### refactor(docker): a slim image; the official repository is built in; SearXNG is its own container
+
+**The image.** Multi-stage: the Python environment is built in a throwaway stage (no dev dependencies, no uv cache, no compiler) and only `/app/venv` is copied. The runtime image keeps `tini`, TLS, `openssl`, `git`, `ffmpeg`, `postgresql-client` and the headless-GL libraries; it no longer has Node.js (only the Minecraft Vessel used it; it will carry its own when it becomes an extension), MariaDB client and headers (the legacy MariaDB drivers are pure Python), vim, nano, htop, ping, wget, unzip, espeak (the KittenTTS extension brings its own), Debian's own Python 3.13 and the compilers. The build no longer needs Node, and the image no longer holds the extensions, `docs/`, `.gitnexus/`, `.synth-ab/`, `data/`, the second copy of Rei, or the S6 overlay. PID 1 is `tini`; `container/entrypoint.sh` does what the S6 run script did.
+
+**The official repository** is no longer baked into the image: it is a built-in, non-removable repository of the extension runtime (pinned address and key, release `latest-develop`, `SYNTH_OFFICIAL_CHANNEL` for another). The defaults are downloaded and installed at the first start; with no network the step is retried at each start. The Repositories tab shows it as *built in*.
+
+**SearXNG** leaves the image: `docker-compose.yml` runs it as `synth-searxng` (`searxng/searxng`, configuration inline) and the web_search plugin's `SEARXNG_URL` defaults to `http://synth-searxng:8080`. A stored `http://127.0.0.1:8888` has to be changed.
+
+**Removed** (find them with `git log --diff-filter=D -- scripts/build_bundled_extensions.py container/s6-services container/searxng`): `scripts/build_bundled_extensions.py`, `tests/test_stage_bundle.py`, the S6 services and the in-container SearXNG settings.
+
+**Location.** `Dockerfile`, `.dockerignore`, `container/entrypoint.sh`, `docker-compose*.yml`, `core/extensions/repo/{config,installer}.py`, `core/extensions/runtime.py`, `plugins/web_search_plugin/`.
+
 ### feat(skins): skins are extensions of kind skins
 
 A skin can be an extension that only ships files (`[[provides.skins]]` with `name`, `type` and `path`, no `[entry]`: nothing runs). The index marks it `kind = "skins"`; the **Skins** tab has a *Get more skins* list from the repositories with Install / Update, and the Plugins Catalog no longer lists them. Installing copies the folder into `skins/<Name>` with a marker file naming the extension; turning it off or uninstalling removes exactly that folder (a folder without the marker, such as one the user made, is never touched), and the start-up sync restores them on a fresh image. `type` is `vrm` for now; `inochi2d` and `live2d` will be added with their renderers. **Rei** and **Zero** stay bundled and cannot be deleted; a skin from an extension shows an **Uninstall** button instead of Delete (the delete route answers 409 and names the extension). **Miku** and **Riko** moved to the official plugins repository (`official/skin_miku`, `official/skin_riko`, not installed by default).

@@ -1,36 +1,32 @@
-# 1. Grab uv binary from its official image
+# syntax=docker/dockerfile:1
+#
+# The image holds the Core and what the Core needs. Everything else is installed at run
+# time, from the official extension repository (a built-in, non-removable repository of
+# the extension runtime): the default extensions are downloaded and installed on the
+# first start. Services that belong to one plugin (Zen, SearXNG) are separate containers
+# in docker-compose.yml. (The S6 overlay, the in-container SearXNG and the baked-in extensions
+# were removed in commit 805c5d53: `git log --diff-filter=D -- container/s6-services`.)
+
+# 1. The uv binary, from its official image.
 FROM ghcr.io/astral-sh/uv:latest AS uv_source
 
-# 1b. Build the SyntH Stage frontend (Vue 3 SPA) in a dedicated Node stage.
-# The compiled bundle is copied into the final image so the backend can mount
-# it at /stage (see core/webui.py). Kept as a separate stage so the Node/pnpm
-# toolchain never bloats the runtime image.
-FROM node:22-slim AS stage_builder
-ENV PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
-RUN corepack enable
-WORKDIR /build
-# Copy dependency manifests first for layer caching.
-COPY frontend/package.json frontend/pnpm-lock.yaml ./
-RUN pnpm install --frozen-lockfile
-# Copy the rest of the frontend source and build to /build/dist.
-COPY frontend/ ./
-RUN pnpm build
+# 2. Builder: the Python environment. Nothing from here but /app/venv reaches the final
+# image, so no uv cache, no build tools and no dev dependencies end up in it.
+# python:3.12-slim has to be the same image as the final stage: the venv points at its
+# interpreter.
+FROM python:3.12-slim AS builder
+COPY --from=uv_source /uv /usr/local/bin/uv
+WORKDIR /app
+COPY pyproject.toml uv.lock ./
+ENV UV_PROJECT_ENVIRONMENT=/app/venv \
+    UV_LINK_MODE=copy
+# --frozen: the exact versions of uv.lock. --no-dev: no pytest, ruff, sphinx. The project
+# itself is not installed: the code is on PYTHONPATH.
+RUN uv sync --frozen --no-dev --no-install-project --no-cache
 
-# The official extensions' sources (the plugins repository), cloned at PLUGINS_REF. A local
-# checkout replaces this stage: `docker build --build-context plugins=../synthetic-heart-official-plugins`
-# (docker-compose-dev.yml does it), so a build can use extensions that are not pushed yet.
-FROM alpine/git AS plugins_clone
-ARG PLUGINS_REPO=https://github.com/XargonWan/synthetic-heart-official-plugins.git
-ARG PLUGINS_REF=develop
-RUN git clone --depth 1 --branch "$PLUGINS_REF" "$PLUGINS_REPO" /plugins
-FROM scratch AS plugins
-COPY --from=plugins_clone /plugins/extensions /extensions
-
-# 2. Start your actual Base Image (Debian slim)
-# PyTorch official wheels require a glibc-based Python environment.
+# 3. The final image.
 FROM python:3.12-slim
 
-ARG TARGETARCH
 ARG GITVERSION_TAG=0.0.0-dev
 ARG BUILD_DATE
 ARG VERSION
@@ -38,181 +34,56 @@ ARG VERSION
 LABEL build_version="Synthetic Heart version:- ${VERSION} Build-date:- ${BUILD_DATE}"
 LABEL maintainer="xargonwan"
 
-# --- [Standard Env Setup] ---
 ENV TITLE="Synthetic Heart"
 ENV REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt \
     SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
 
-# --- [System Dependencies] ---
+# --- [System packages: only what the Core runs] ---
+#   tini                 PID 1: reaps the processes extensions spawn
+#   ca-certificates      TLS            openssl   the WebUI's self-signed certificate
+#   git                  repositories of kind "git" (github releases need no git)
+#   ffmpeg               audio and video conversion
+#   postgresql-client    pg_dump for the database backups
+#   libegl1 ... mesa     headless avatar renderer (software GL, no GPU, no display)
+# No compiler, no editors, no MariaDB client: every Python dependency is a wheel.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      bash curl wget unzip nano vim git \
-      ca-certificates \
-      openssl \
-      htop net-tools iputils-ping \
-  ffmpeg mariadb-client libmariadb-dev postgresql-client \
-      espeak \
-      xz-utils \
-      python3-venv python3-dev build-essential libxml2-dev libxslt1-dev \
-      zlib1g-dev libffi-dev libssl-dev \
+      tini ca-certificates openssl git \
+      ffmpeg postgresql-client \
       libegl1 libegl-mesa0 libgl1 libgl1-mesa-dri \
     && rm -rf /var/lib/apt/lists/* \
     && useradd -m -s /bin/bash abc
 
-# --- [Headless avatar renderer: Mesa EGL + software GL (llvmpipe)] ---
 # core/avatar_render draws the SyntH's face for video calls on the server with moderngl.
-# The packages above give an EGL context without a GPU or a display. moderngl's glcontext
-# opens "libEGL.so" / "libGL.so" by their unversioned names, which Debian only ships in the
-# -dev packages: link them to the runtime libraries (works on amd64 and arm64).
+# moderngl's glcontext opens "libEGL.so" / "libGL.so" by their unversioned names, which
+# Debian only ships in the -dev packages: link them to the runtime libraries (works on
+# amd64 and arm64).
 RUN for lib in libEGL libGL; do \
       target="$(ldconfig -p | awk -v n="$lib.so.1" '$1 == n { print $NF; exit }')" && \
       test -n "$target" && ln -sf "$target" "/usr/local/lib/$lib.so" ; \
     done && ldconfig
 
-# --- [Node.js LTS for the Minecraft Vessel] ---
-# The runtime image (python:3.12-slim) ships WITHOUT Node. The Minecraft Rift
-# Vessel connector (issue #60) runs a Node.js Mineflayer bridge as a subprocess,
-# so Node is baked into the Docker image by DEFAULT (INSTALL_NODE=true) — the
-# Minecraft Vessel works out of the box in Docker with no extra build flags.
-# Only non-Docker / bare-metal deployments need to install Node themselves; a
-# node-free image can be built explicitly with:
-#
-#   docker build --build-arg INSTALL_NODE=false ...
-#
-ARG INSTALL_NODE=true
-ARG NODE_MAJOR=22
-RUN if [ "${INSTALL_NODE}" = "true" ]; then \
-      curl -fsSL "https://deb.nodesource.com/setup_${NODE_MAJOR}.x" | bash - && \
-      apt-get install -y --no-install-recommends nodejs && \
-      rm -rf /var/lib/apt/lists/* && \
-      node --version && npm --version ; \
-    else \
-      echo "INSTALL_NODE=false — skipping Node.js (Minecraft Vessel disabled)" ; \
-    fi
-
-# --- [S6 Overlay] ---
-ENV S6_OVERLAY_VERSION=v3.2.2.0
-RUN case "${TARGETARCH:-amd64}" in \
-      amd64) overlay_arch=x86_64 ;; \
-      arm64|aarch64) overlay_arch=aarch64 ;; \
-      *) overlay_arch=x86_64 ;; \
-    esac && \
-    wget -qO /tmp/s6-overlay-${overlay_arch}.tar.xz \
-      "https://github.com/just-containers/s6-overlay/releases/download/${S6_OVERLAY_VERSION}/s6-overlay-${overlay_arch}.tar.xz" && \
-    wget -qO /tmp/s6-overlay-noarch.tar.xz \
-      "https://github.com/just-containers/s6-overlay/releases/download/${S6_OVERLAY_VERSION}/s6-overlay-noarch.tar.xz" && \
-    tar xJf /tmp/s6-overlay-noarch.tar.xz -C / && \
-    tar xJf /tmp/s6-overlay-${overlay_arch}.tar.xz -C / && \
-    rm -f /tmp/s6-overlay-*.tar.xz
-
-# --- [Inject UV] ---
-# Copy the uv binary into /usr/local/bin so it's available globally
-COPY --from=uv_source /uv /usr/local/bin/uv
-
-# --- [CLI Tools Setup] ---
-# gemini-cli is installed in the project venv via uv sync (pyproject dependency)
-# (Avoid system pip install in PEP-668 managed environment.)
-
-# --- [Python & UV Setup] ---
 WORKDIR /app
-
-# 1. Copy dependency files FIRST (for caching)
-COPY pyproject.toml uv.lock ./
-# (no vendored packages needed any more)
-# (Optional fallback if you don't have lockfiles yet: COPY requirements.txt . )  # kept for backwards compatibility, not needed in normal builds
-
-# 2. Tell uv to create the venv at /app/venv (Matching your old structure)
 ENV UV_PROJECT_ENVIRONMENT=/app/venv
-
-# 3. Create venv and Install Dependencies
-# This replaces the old "python3 -m venv && pip install" block
-# --frozen: Uses the exact versions from uv.lock
-RUN uv sync --frozen --no-cache
+COPY --from=builder /app/venv /app/venv
 
 # Build-time check of the headless renderer: prints the GL implementation, or a loud warning
 # (the build is not failed: calls then simply stay audio-only, see docs/call_service.rst).
 RUN EGL_PLATFORM=surfaceless /app/venv/bin/python -c "import moderngl; c = moderngl.create_standalone_context(backend='egl'); print('avatar renderer GL:', c.info['GL_RENDERER'])" \
     || echo "WARNING: no headless GL context in this image: video calls will be audio-only"
 
-
-# --- [SearXNG (self-hosted, in-container) ] ---
-# SearXNG is NOT published as an official pip/uv package (the PyPI "searxng"
-# project is an unrelated pre-alpha MCP client). The canonical install is from
-# source into its own isolated venv so its pinned deps never collide with the
-# SyntH app venv. It runs locally on 127.0.0.1:8888 and is queried by the
-# web_search plugin as the preferred backend (see plugins/web_search).
-ENV SEARXNG_SRC=/app/searxng \
-    SEARXNG_VENV=/app/searxng-venv \
-    SEARXNG_SETTINGS_PATH=/etc/searxng/settings.yml
-RUN mkdir -p /etc/searxng
-COPY container/searxng/settings.yml /etc/searxng/settings.yml
-RUN git clone --depth 1 https://github.com/searxng/searxng.git "$SEARXNG_SRC" && \
-    uv venv "$SEARXNG_VENV" && \
-    VIRTUAL_ENV="$SEARXNG_VENV" uv pip install --python "$SEARXNG_VENV/bin/python" \
-      setuptools wheel -r "$SEARXNG_SRC/requirements.txt" granian && \
-    VIRTUAL_ENV="$SEARXNG_VENV" uv pip install --python "$SEARXNG_VENV/bin/python" \
-      --no-build-isolation -e "$SEARXNG_SRC"
-RUN chown -R abc:abc "$SEARXNG_SRC" "$SEARXNG_VENV" /etc/searxng
-
-
-# --- [App Setup] ---
-# Copy scripts
-COPY automation_tools/container_synth.sh /app/synth.sh
-RUN chmod +x /app/synth.sh
-
-# Copy application code (includes vendor packages)
-COPY . /app
-
-# Seed copy of the default skin: /app/skins is usually shadowed by a named
-# volume that starts empty, which 500s /api/skins (Rei is required) and stalls
-# the WebUI on "summoning". The s6 run script copies this into the volume.
+# --- [App] ---
+# The application code. Rei is not copied here: the default skin lives once, in
+# /app/.skins-seed (the entrypoint seeds it into the skins volume).
+COPY --exclude=skins/Rei . /app
 COPY skins/Rei /app/.skins-seed/Rei
+# The launcher runs /app/venv/bin/python directly (the repository's own synth.sh is for
+# development and uses `uv run`; uv is not in this image).
+RUN chmod +x /app/container/entrypoint.sh /app/automation_tools/container_synth.sh
 
-# Copy the pre-built SyntH Stage client from the Node build stage into the Stage
-# extension package (official/synth_stage serves it at /stage/). Placed AFTER
-# `COPY . /app` so it is never clobbered; the host has no build output, this is the
-# sole source of it.
-COPY --from=stage_builder /build/dist /tmp/stage-dist
-
-# Pack the default extensions into /app/extensions_bundled: the read-only repository
-# the first start installs them from (offline). Their sources are in the official plugins
-# repository (PLUGINS_REF is the branch or tag to take them from); the Stage client built
-# above is put into its package. The signing key is made for this build and discarded; only
-# its public half is kept next to the index. Needs the network here, to fetch the sources
-# and to build each extension's libraries into its package.
-COPY --from=plugins /extensions /tmp/official-plugins/extensions
-RUN cp -r /tmp/stage-dist /tmp/official-plugins/extensions/synth_stage/web && \
-    /app/venv/bin/python /app/scripts/build_bundled_extensions.py --sources /tmp/official-plugins/extensions && \
-    rm -rf /tmp/official-plugins /tmp/stage-dist
-
-# vendored packages are installed by `uv sync` earlier via path sources.
-# Historically we pip-installed them here, but that invoked the system pip
-# outside of the UV_PROJECT_ENVIRONMENT and caused modules to be missing at
-# runtime.  Keeping them solely under uv sync ensures they live in /app/venv.
-
-# Cleanup & Permissions
-RUN rm -rf /app/s6-services /app/automation_tools
 ENV PYTHONPATH=/app
-# Concretize the resolved version into the image so it is available at runtime
-# via os.getenv("SYNTH_VERSION") (read by core/webui.py). GITVERSION_TAG is
-# supplied by CI (scripts/version.py); local builds fall back to the
-# ARG default above.
+# The resolved version, available at runtime as os.getenv("SYNTH_VERSION") (read by
+# core/webui.py). GITVERSION_TAG is supplied by CI (scripts/version.py); local builds fall
+# back to the ARG default above.
 ENV SYNTH_VERSION=$GITVERSION_TAG
 
-# S6 Services Setup
-COPY container/s6-services/synth /etc/s6-overlay/s6-rc.d/synth
-RUN chmod +x /etc/s6-overlay/s6-rc.d/synth/run && \
-    mkdir -p /etc/s6-overlay/s6-rc.d/user/contents.d && \
-    echo synth > /etc/s6-overlay/s6-rc.d/user/contents.d/synth && \
-    chown -R abc:abc /etc/s6-overlay/s6-rc.d/synth
-
-# S6 Service: SearXNG (in-container search backend, longrun)
-COPY container/s6-services/searxng /etc/s6-overlay/s6-rc.d/searxng
-RUN chmod +x /etc/s6-overlay/s6-rc.d/searxng/run && \
-    echo searxng > /etc/s6-overlay/s6-rc.d/user/contents.d/searxng && \
-    chown -R abc:abc /etc/s6-overlay/s6-rc.d/searxng
-
-# Final cleanup
-RUN rm -rf /tmp/*
-
-ENTRYPOINT ["/init"]
-
+ENTRYPOINT ["/usr/bin/tini", "--", "/app/container/entrypoint.sh"]
