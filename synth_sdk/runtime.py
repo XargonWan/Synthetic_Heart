@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Any, cast
 
 from synth_sdk import __version__
+from synth_sdk.live import LiveEngine, LiveSession
 from synth_sdk.rpc import (
     MAX_MESSAGE_BYTES,
     PROTOCOL_VERSION,
@@ -503,10 +504,15 @@ class Calls(_Namespace):
     :meth:`audio`; the Core asks you to play its replies with :meth:`on_play`.
     """
 
-    async def provider(self, interface_id: str, video: bool = False) -> None:
+    async def provider(
+        self, interface_id: str, video: bool = False, stream: bool = False
+    ) -> None:
         """Announce that ``interface_id`` hosts calls (``video``: it can carry the
-        SyntH's face)."""
-        await self._ctx.call("calls.provider", interface_id=interface_id, video=video)
+        SyntH's face; ``stream``: it can play audio as it arrives, which a Live engine's
+        voice needs, see :meth:`on_stream`)."""
+        await self._ctx.call(
+            "calls.provider", interface_id=interface_id, video=video, stream=stream
+        )
 
     async def open(
         self,
@@ -517,8 +523,11 @@ class Calls(_Namespace):
         languages: list[str] | None = None,
         announce: bool = True,
     ) -> dict[str, Any]:
-        """A call began. Returns ``{"call_id", "kind", "degraded", "video"}`` where
-        ``video`` is ``{"fps", "width", "height"}`` when the face can be shown. With
+        """A call began. Returns ``{"call_id", "kind", "degraded", "video", "mode"}``
+        where ``video`` is ``{"fps", "width", "height"}`` when the face can be shown and
+        ``mode`` is ``"classic"`` (the Core answers with turns and :meth:`on_play`) or
+        ``"live"`` (a Live engine holds the call: play what :meth:`on_stream` gives you
+        and drop it on :meth:`on_flush`; keep sending :meth:`audio`). With
         ``announce`` the answering tone arrives as an :meth:`on_play` request *before*
         this returns, so keep the play handler free to run while you wait."""
         params: dict[str, Any] = {
@@ -594,6 +603,40 @@ class Calls(_Namespace):
 
         self._ctx.handle("call.play", adapter)
 
+    def on_stream(
+        self, handler: Callable[[str, str, bytes, int], Awaitable[Any] | Any]
+    ) -> None:
+        """The model's voice in a ``"live"`` call: ``handler(interface_id, call_id, pcm,
+        rate)`` with raw 16-bit mono PCM. Chunks arrive in order; queue each one after the
+        last and return at once. Register the interface with ``stream=True``."""
+
+        async def adapter(params: dict[str, Any]) -> Any:
+            result = handler(
+                str(params.get("interface_id", "")),
+                str(params.get("call_id", "")),
+                base64.b64decode(str(params.get("pcm", ""))),
+                int(params.get("rate") or 24000),
+            )
+            if asyncio.iscoroutine(result):
+                await result
+            return {}
+
+        self._ctx.handle("call.stream", adapter)
+
+    def on_flush(self, handler: Callable[[str, str], Awaitable[Any] | Any]) -> None:
+        """The caller spoke over the model: ``handler(interface_id, call_id)`` drops
+        every chunk of :meth:`on_stream` queued but not yet played."""
+
+        async def adapter(params: dict[str, Any]) -> Any:
+            result = handler(
+                str(params.get("interface_id", "")), str(params.get("call_id", ""))
+            )
+            if asyncio.iscoroutine(result):
+                await result
+            return {}
+
+        self._ctx.handle("call.flush", adapter)
+
     def on_ended(
         self, handler: Callable[[str, str, str | None], Awaitable[Any] | Any]
     ) -> None:
@@ -623,6 +666,89 @@ class Calls(_Namespace):
             return {}
 
         self._ctx.handle("call.video_lost", adapter)
+
+
+class Live(_Namespace):
+    """The Live engine you provide (``provides.engines = ["live"]``, capability
+    ``live.provider``). See :mod:`synth_sdk.live`."""
+
+    def __init__(self, ctx: Context) -> None:
+        super().__init__(ctx)
+        self._engine: Any = None
+        self._sessions: dict[str, LiveSession] = {}
+
+    async def serve(self, name: str, engine: LiveEngine) -> None:
+        """Offer ``engine`` to the Core under ``name`` (a lowercase identifier)."""
+        self._engine = engine
+        self._ctx.handle("live.open", self._open)
+        self._ctx.handle("live.audio", self._audio)
+        self._ctx.handle("live.text", self._text)
+        self._ctx.handle("live.tool_result", self._tool_result)
+        self._ctx.handle("live.close", self._close)
+        await self._ctx.call(
+            "live.provider",
+            name=name,
+            label=engine.label or name,
+            input_rate=engine.input_rate,
+            output_rate=engine.output_rate,
+            max_session_seconds=engine.max_session_seconds,
+        )
+
+    async def _emit(self, params: dict[str, Any]) -> None:
+        await self._ctx.call("live.event", **params)
+
+    async def _open(self, params: dict[str, Any]) -> Any:
+        session = LiveSession(
+            session_id=str(params.get("session_id", "")),
+            system_instruction=str(params.get("system_instruction", "")),
+            tools=list(params.get("tools") or []),
+            voice=str(params.get("voice", "")),
+            language=str(params.get("language", "")),
+            resume_handle=params.get("resume_handle"),
+            options=dict(params.get("options") or {}),
+            _emit=self._emit,
+        )
+        self._sessions[session.session_id] = session
+        try:
+            await self._engine.open(session)
+        except Exception as exc:  # noqa: BLE001 - the Core falls back to the classic call
+            self._sessions.pop(session.session_id, None)
+            raise RpcError(ErrorCode.SERVER_ERROR, str(exc)[:200] or "could not open") from exc
+        return {"ok": True}
+
+    async def _audio(self, params: dict[str, Any]) -> Any:
+        session_id = str(params.get("session_id", ""))
+        if session_id in self._sessions:
+            await self._engine.audio(
+                session_id,
+                base64.b64decode(str(params.get("pcm", ""))),
+                int(params.get("rate") or 16000),
+            )
+
+    async def _text(self, params: dict[str, Any]) -> Any:
+        session_id = str(params.get("session_id", ""))
+        if session_id in self._sessions:
+            await self._engine.text(
+                session_id, str(params.get("text", "")), str(params.get("kind", "context"))
+            )
+        return {}
+
+    async def _tool_result(self, params: dict[str, Any]) -> Any:
+        session_id = str(params.get("session_id", ""))
+        if session_id in self._sessions:
+            await self._engine.tool_result(
+                session_id,
+                str(params.get("call_id", "")),
+                str(params.get("name", "")),
+                dict(params.get("result") or {}),
+            )
+        return {}
+
+    async def _close(self, params: dict[str, Any]) -> Any:
+        session_id = str(params.get("session_id", ""))
+        if self._sessions.pop(session_id, None) is not None:
+            await self._engine.close(session_id)
+        return {}
 
 
 class Panels(_Namespace):
@@ -1175,6 +1301,7 @@ class Context:
         self.interfaces = Interfaces(self)
         self.panels = Panels(self)
         self.calls = Calls(self)
+        self.live = Live(self)
         self.avatar = Avatar(self)
         self.core = CoreInfo(self)
         self.web = Web(self)

@@ -35,6 +35,7 @@ from core.extensions.vessels import VesselHost, attach_vessels, register_vessel_
 from core.extensions.voice import VoicePort, register_voice_api
 from core.extensions.web import WebSocketHub, register_web_api
 from core.extensions.calls import CallPorts, register_call_api
+from core.extensions.live import LiveHost, register_live_api
 from core.extensions.gateway import AuditRecord, Gateway
 from core.extensions.grants import FileGrantStore, GrantStore
 from core.extensions.interfaces import InterfacePorts, register_interface_api
@@ -83,6 +84,7 @@ class ExtensionRuntime:
         recon_host: ReconHost | None = None,
         protocol_host: ProtocolHost | None = None,
         vessel_host: VesselHost | None = None,
+        live_host: LiveHost | None = None,
         karada_host: KaradaHost | None = None,
         media_root: Path | None = None,
         outbound_resolver: OutboundResolver | None = None,
@@ -166,6 +168,8 @@ class ExtensionRuntime:
             attach_protocols(self.gateway, protocol_host, self.media, warn=self._warn)
         if karada_host is not None:
             register_karada_api(self.gateway, karada_host)
+        if live_host is not None:
+            register_live_api(self.gateway, live_host)
         if vessel_host is not None:
             register_vessel_api(self.gateway)
             attach_vessels(self.gateway, vessel_host, warn=self._warn)
@@ -377,6 +381,7 @@ async def start_extension_runtime() -> StartReport | None:
         from core.extensions.protocols import CoreProtocolHost
         from core.extensions.karada import CoreKaradaHost
         from core.extensions.vessels import CoreVesselHost
+        from core.extensions.live import CoreLiveHost
         from core.extensions.core_interfaces import (
             CoreReconHost,
             CoreTurns,
@@ -410,6 +415,7 @@ async def start_extension_runtime() -> StartReport | None:
             recon_host=CoreReconHost(),
             protocol_host=CoreProtocolHost(),
             vessel_host=CoreVesselHost(),
+            live_host=CoreLiveHost(),
             karada_host=CoreKaradaHost(),
             media_root=data_root() / "media" / "extensions",
             outbound_resolver=core_outbound_resolver,

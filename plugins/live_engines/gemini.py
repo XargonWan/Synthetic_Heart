@@ -261,7 +261,9 @@ class GeminiLiveEngine(LiveEngineBase):
     # Output side: inject text / trigger TTS
     # ------------------------------------------------------------------
 
-    async def send_text(self, session_id: str, text: str) -> None:
+    async def send_text(
+        self, session_id: str, text: str, kind: str = "context"
+    ) -> None:
         """Send a text message to Gemini Live (triggers TTS synthesis).
 
         On Gemini 3.1 Flash Live, use ``send_realtime_input(text=...)`` —

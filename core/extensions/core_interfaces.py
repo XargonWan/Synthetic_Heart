@@ -310,6 +310,7 @@ def core_call_ports() -> Any:
     from core.call_manager import get_call_manager
     from core.call_video import VideoSettings, get_call_video_hub, jpeg_to_i420
     from core.extensions.calls import CallPorts
+    from core.live_call_bridge import get_live_calls
 
     return CallPorts(
         manager=get_call_manager,
@@ -317,6 +318,7 @@ def core_call_ports() -> Any:
         video=get_call_video_hub,
         jpeg_to_i420=jpeg_to_i420,
         video_settings=VideoSettings.from_config,
+        live=get_live_calls,
     )
 
 

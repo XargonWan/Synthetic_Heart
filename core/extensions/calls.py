@@ -10,14 +10,17 @@ Extension to Core (capability ``calls``):
 
 ``calls.provider``
     announce that one of the extension's registered interfaces hosts calls (and
-    whether it can carry the SyntH's face);
+    whether it can carry the SyntH's face, and whether it can play a stream, see below);
 ``calls.open``
     a call began (answered or placed): the Core starts the session. The tone that
     answers it arrives as a ``call.play`` request before this call returns, so keep the
-    extension free to handle it while waiting;
+    extension free to handle it while waiting. The answer says ``mode``: ``classic``
+    (the Core listens, answers with a turn and sends the spoken reply as ``call.play``
+    files) or ``live`` (a Live engine holds the whole conversation, see below);
 ``calls.audio``
     what the caller says: raw 16-bit PCM and its rate, any rate, mono or stereo. The
-    Core converts and runs it through the speech pipeline;
+    Core converts it and runs it through the speech pipeline, or, in ``live`` mode, sends
+    it to the Live engine;
 ``calls.video_frame``
     the newest frame of the SyntH's face as planar I420 (``width`` x ``height`` from
     ``calls.open``), or none yet;
@@ -25,7 +28,14 @@ Extension to Core (capability ``calls``):
     the call is over on the platform side.
 
 Core to extension: ``call.play`` (play this file into the call; returns ``{"seconds"}``)
-and the notifications ``call.ended`` and ``call.video_lost``. Dialling out and hanging
+and the notifications ``call.ended`` and ``call.video_lost``.
+
+**Live mode.** An interface that announces ``stream=True`` can play audio as it arrives.
+When ``CALL_LIVE_ENGINE_ENABLED`` is on and a Live engine is available, ``calls.open``
+answers ``mode: "live"`` and the Core sends the model's voice as ``call.stream`` (raw
+16-bit mono PCM and its rate, in order, queued after what is already playing) and tells the
+extension to drop what it has queued with ``call.flush`` when the caller speaks over the
+model. The extension keeps sending ``calls.audio`` exactly as in classic mode. Dialling out and hanging
 up on request are ``interface.start_call`` / ``interface.end_call`` (see
 ``core.extensions.interfaces``).
 """
@@ -78,6 +88,46 @@ class CallPorts:
     jpeg_to_i420: Callable[[bytes, int, int], bytes]
     #: ``() -> (fps, width, height)`` of the call video the operator configured.
     video_settings: Callable[[], Any]
+    #: ``() -> LiveCalls``: the calls held by a Live engine, or ``None`` for none.
+    live: Callable[[], Any] | None = None
+
+
+class RemoteSink:
+    """The model's voice, handed to the extension that carries the call."""
+
+    def __init__(self, session: Session, interface_id: str, call_id: str) -> None:
+        self._session = session
+        self._interface_id = interface_id
+        self._call_id = call_id
+
+    async def stream(self, pcm: bytes, rate: int) -> None:
+        if self._session.peer.closed:
+            return
+        for start in range(0, len(pcm), MAX_PCM_BYTES):
+            part = pcm[start : start + MAX_PCM_BYTES]
+            try:
+                await self._session.notify(
+                    "call.stream",
+                    {
+                        "interface_id": self._interface_id,
+                        "call_id": self._call_id,
+                        "pcm": base64.b64encode(part).decode("ascii"),
+                        "rate": rate,
+                    },
+                )
+            except RpcError:
+                return
+
+    async def flush(self) -> None:
+        if self._session.peer.closed:
+            return
+        try:
+            await self._session.notify(
+                "call.flush",
+                {"interface_id": self._interface_id, "call_id": self._call_id},
+            )
+        except RpcError:
+            return
 
 
 class RemoteCallProvider(CallProvider):
@@ -94,8 +144,11 @@ class RemoteCallProvider(CallProvider):
         ports: CallPorts,
         messaging: MessagingPort,
         media: MediaBridge | None,
+        stream: bool = False,
     ) -> None:
         self.name = remote.spec.id
+        #: The extension can play audio as it arrives (``call.stream``).
+        self.streams = stream
         self.capabilities = CallCapabilities(
             audio=True, video=video, screen_share=False
         )
@@ -160,6 +213,10 @@ class RemoteCallProvider(CallProvider):
         return {"fps": settings.fps, "width": settings.width, "height": settings.height}
 
     def is_agent_speaking(self, session: CallSession) -> bool:
+        live = self._ports.live() if self._ports.live is not None else None
+        bridge = live.get(session.call_id) if live is not None else None
+        if bridge is not None and bridge.is_speaking:
+            return True
         return time.monotonic() < self._speaking_until
 
     # --------------------------------------------------------------- turns
@@ -195,6 +252,8 @@ class RemoteCallProvider(CallProvider):
 
     async def on_call_ended(self, session: CallSession) -> None:
         self.calls.discard(session.call_id)
+        if self._ports.live is not None:
+            await self._ports.live().end(session.call_id)
         if self._session.peer.closed:
             return
         try:
@@ -270,6 +329,7 @@ def register_call_api(
             ports=ports,
             messaging=messaging,
             media=media,
+            stream=bool(args["stream"]),
         )
         manager.register_provider(hosted)
         existing[interface_id] = hosted
@@ -321,7 +381,33 @@ def register_call_api(
             "kind": session.kind.value,
             "degraded": session.degraded,
             "video": video,
+            "mode": await _hand_to_live(ctx, hosted, session),
         }
+
+    async def _hand_to_live(
+        ctx: CallContext, hosted: RemoteCallProvider, session: CallSession
+    ) -> str:
+        """``live`` when a Live engine holds this call, else ``classic``."""
+        if ports.live is None or not hosted.streams:
+            return "classic"
+        live = ports.live()
+        if live.get(session.call_id) is not None:
+            return "live"
+        if not ports.manager().live_enabled():
+            return "classic"
+        manager = ports.manager()
+
+        async def lost(call_id: str) -> None:
+            await manager.end_call(call_id)
+
+        bridge = await live.begin(
+            session.call_id,
+            hosted.name,
+            session.interface_path,
+            RemoteSink(ctx.session, hosted.name, session.call_id),
+            on_lost=lost,
+        )
+        return "live" if bridge is not None else "classic"
 
     async def _start_video(
         ctx: CallContext, hosted: RemoteCallProvider, session: CallSession
@@ -357,6 +443,12 @@ def register_call_api(
         if len(raw) > MAX_PCM_BYTES:
             raise RpcError(ErrorCode.INVALID_PARAMS, "pcm chunk is too large")
         pcm = _to_16k_mono(raw, args["rate"], args["channels"])
+        bridge = ports.live().get(args["call_id"]) if ports.live is not None else None
+        if bridge is not None:
+            await bridge.feed(
+                pcm, args["speaker_id"] or "", args["speaker_name"] or ""
+            )
+            return {"ok": True}
         ports.pipeline().feed(
             args["call_id"],
             pcm,
@@ -393,6 +485,8 @@ def register_call_api(
         hosted = _own_call(ctx, args["call_id"])
         hosted.calls.discard(args["call_id"])
         await ports.video().end(args["call_id"])
+        if ports.live is not None:
+            await ports.live().end(args["call_id"])
         return {"ended": await ports.manager().end_call(args["call_id"])}
 
     ident = Param("interface_id", max_length=64)
@@ -401,7 +495,11 @@ def register_call_api(
         ApiMethod(
             "calls.provider",
             CAP_CALLS,
-            (ident, Param("video", "bool", required=False, default=False)),
+            (
+                ident,
+                Param("video", "bool", required=False, default=False),
+                Param("stream", "bool", required=False, default=False),
+            ),
             provider,
             "Announce that an interface hosts calls.",
         ),
@@ -452,6 +550,8 @@ def register_call_api(
             for call_id in list(hosted.calls):
                 hosted.calls.discard(call_id)
                 await ports.video().end(call_id)  # stop the camera too
+                if ports.live is not None:
+                    await ports.live().end(call_id)
                 await manager.end_call(call_id)
             manager.unregister_provider(name)
         providers.clear()

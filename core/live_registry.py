@@ -74,6 +74,10 @@ class LiveRegistry:
     def get_engine_meta(self, name: str) -> Dict[str, Any]:
         return self._engine_meta.get(name, {})
 
+    def get_instance(self, name: str) -> Any:
+        """The engine instance already built for *name*, or ``None`` (nothing is loaded)."""
+        return self._instances.get(name)
+
     def find_engine_by_capabilities(self, required: LiveCapabilities) -> Optional[str]:
         """Return the first registered engine satisfying all *required* caps."""
         for name, meta in self._engine_meta.items():

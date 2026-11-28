@@ -46,6 +46,9 @@ class LiveEventType(str, Enum):
     VAD = "vad"  # Voice-activity detection signal
     ERROR = "error"  # Engine-side error
     TOOL_CALL = "tool_call"  # Model requested a function/tool call
+    TURN_COMPLETE = "turn_complete"  # The model finished answering one turn
+    INTERRUPTED = "interrupted"  # The caller spoke over the model: drop what is queued
+    STATE = "state"  # Session health: ``detail`` is connected/reconnecting/closed
 
 
 @dataclass
@@ -160,8 +163,14 @@ class LiveEngineBase(ABC):
     # TTS side (output) — optional
     # ------------------------------------------------------------------
 
-    async def send_text(self, session_id: str, text: str) -> None:
+    async def send_text(
+        self, session_id: str, text: str, kind: str = "context"
+    ) -> None:
         """Request speech synthesis for *text* within this session.
+
+        ``kind`` says what the line is: ``"context"`` is something the model should
+        know, ``"turn"`` is something it should answer. Engines that cannot tell the
+        two apart ignore it.
 
         The synthesised audio will arrive as ``LiveEvent(type=AUDIO, ...)``
         events on ``receive_events``.  Engines that do not support output may
