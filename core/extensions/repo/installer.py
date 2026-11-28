@@ -28,7 +28,13 @@ from packaging.version import InvalidVersion, Version
 
 from core.extensions.archive import archive_sha256, check_archive, read_archive_manifest
 from core.extensions.grants import FileGrantStore
-from core.extensions.manifest import EXTENSION_ID_RE, Manifest, ManifestError
+from core.extensions.manifest import (
+    EXTENSION_ID_RE,
+    MANIFEST_FILENAME,
+    Manifest,
+    ManifestError,
+    load_manifest,
+)
 from core.extensions.repo import progress
 from core.extensions.repo.config import (
     OFFICIAL_NAME,
@@ -62,6 +68,7 @@ from core.extensions.repo.transports import (
     fetch_url,
 )
 from core.extensions.repo.github_access import github_token
+from core.extensions.repo.previews import PREVIEW_NAMES, fit
 from core.extensions.resolver import CORE_API_VERSION, check_install
 
 #: Extraction limits: a hostile archive must not fill the disk or the inode table.
@@ -778,21 +785,36 @@ class Installer:
     # ---------------------------------------------------------- screenshots
 
     def _installed_screenshots(self, extension_id: str) -> list[Path]:
-        """The pictures in the installed package's ``screenshots/`` folder, by file name."""
-        folder = self.install_dir(extension_id) / "screenshots"
-        if not folder.is_dir():
-            return []
-        return sorted(
-            (
-                p
-                for p in folder.iterdir()
-                if p.is_file()
-                and not p.is_symlink()
-                and p.suffix.lower() in SCREENSHOT_SUFFIXES
-                and 0 < p.stat().st_size <= MAX_SCREENSHOT_BYTES
-            ),
-            key=lambda p: p.name,
-        )[:MAX_SCREENSHOTS]
+        """The pictures of the installed package: a skin's own preview first (whatever its
+        size: :meth:`screenshot` shrinks it), then its ``screenshots/`` folder by file name."""
+        root = self.install_dir(extension_id)
+        found: list[Path] = []
+        try:
+            skins = load_manifest(root / MANIFEST_FILENAME).provides.skins
+        except Exception:  # noqa: BLE001 - no readable manifest: no skin preview
+            skins = ()
+        for skin in skins:
+            for candidate in PREVIEW_NAMES:
+                path = root / skin.path / candidate
+                if path.is_file() and not path.is_symlink() and path.stat().st_size > 0:
+                    found.append(path)
+                    break
+        folder = root / "screenshots"
+        if folder.is_dir():
+            found.extend(
+                sorted(
+                    (
+                        p
+                        for p in folder.iterdir()
+                        if p.is_file()
+                        and not p.is_symlink()
+                        and p.suffix.lower() in SCREENSHOT_SUFFIXES
+                        and 0 < p.stat().st_size <= MAX_SCREENSHOT_BYTES
+                    ),
+                    key=lambda p: p.name,
+                )
+            )
+        return found[:MAX_SCREENSHOTS]
 
     def screenshot(self, extension_id: str, number: int) -> tuple[bytes, str] | None:
         """Picture ``number`` (from 0, in file-name order) of an extension and its media
@@ -811,7 +833,10 @@ class Installer:
             if not 0 <= number < len(local):
                 return None
             path = local[number]
-            return path.read_bytes(), media[path.suffix.lower()]
+            fitted = fit(path.read_bytes(), path.suffix.lower())
+            if fitted is None:
+                return None
+            return fitted[0], media[fitted[1]]
         candidates, _ = self.available()
         offered = [c for c in candidates if c.entry.id == extension_id]
         if not offered:

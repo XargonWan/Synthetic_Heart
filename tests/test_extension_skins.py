@@ -132,6 +132,121 @@ class TestIndexKind:
         assert [r.kind for r in inst.rows()[0]] == ["skins"]
 
 
+def picture(size: int, mode: str = "RGBA") -> bytes:
+    """A real PNG of ``size`` x ``size`` pixels with enough noise to be big."""
+    import io
+
+    from PIL import Image
+
+    noise = Image.effect_noise((size, size), 60).convert(mode)
+    out = io.BytesIO()
+    noise.save(out, format="PNG")
+    return out.getvalue()
+
+
+def publish_with_preview(
+    tmp_path: Path, data: bytes, name: str = "preview.png"
+) -> Path:
+    repo = tmp_path / "repo"
+    repo.mkdir(exist_ok=True)
+    src = make_skin_source(tmp_path / "s")
+    (src / "skin" / name).write_bytes(data)
+    pack_extension(src, repo, bundle_libs=False)
+    build_index(repo, name="test")
+    return repo
+
+
+class TestPreview:
+    """The catalog shows a skin with its own picture, like the Skins tab does."""
+
+    def test_a_preview_is_found_by_its_usual_names_in_the_skins_folder(self) -> None:
+        from core.extensions.repo.previews import preview_name
+
+        names = ["skin/model.vrm", "skin/preview.jpg", "other/preview.png"]
+        assert preview_name(names, "skin") == "skin/preview.jpg"
+        assert preview_name(names, "skin/") == "skin/preview.jpg"
+        assert preview_name(names, "nowhere") is None
+        assert preview_name(["preview.png"], "") == "preview.png"
+
+    def test_a_picture_that_fits_is_left_alone_and_a_big_one_is_shrunk(self) -> None:
+        import io
+
+        from PIL import Image
+
+        from core.extensions.repo.previews import MAX_EDGE, fit
+
+        small = picture(64)
+        assert fit(small, ".png") == (small, ".png")
+        big = picture(2600)
+        assert len(big) > 2 * 1024 * 1024
+        fitted = fit(big, ".png")
+        assert fitted is not None
+        data, suffix = fitted
+        assert len(data) <= 2 * 1024 * 1024
+        with Image.open(io.BytesIO(data)) as shrunk:
+            assert max(shrunk.size) <= MAX_EDGE and shrunk.mode in ("RGBA", "RGB")
+        assert fit(b"not a picture " * 300000, ".png") is None
+        assert fit(b"", ".png") is None
+
+    def test_the_index_lists_the_preview_of_a_skin_first(self, tmp_path: Path) -> None:
+        repo = publish_with_preview(tmp_path, picture(64))
+        parsed = repo_index.parse_index((repo / "synth-repo.json").read_bytes())
+        (entry,) = parsed.packages
+        assert [s.file.rsplit("--", 1)[1] for s in entry.screenshots] == [
+            "Ada-preview.png"
+        ]
+        assert (repo / entry.screenshots[0].file).is_file()
+
+    def test_a_preview_too_big_for_the_catalog_is_published_shrunk(
+        self, tmp_path: Path
+    ) -> None:
+        # Miku's real preview is 4 MB; the catalog's limit is 2 MB per picture.
+        repo = publish_with_preview(tmp_path, picture(2600))
+        parsed = repo_index.parse_index((repo / "synth-repo.json").read_bytes())
+        (shot,) = parsed.packages[0].screenshots
+        assert 0 < shot.size <= 2 * 1024 * 1024
+        assert (repo / shot.file).stat().st_size == shot.size
+
+    def test_a_skin_without_a_preview_has_no_picture(self, tmp_path: Path) -> None:
+        repo = publish(tmp_path)
+        parsed = repo_index.parse_index((repo / "synth-repo.json").read_bytes())
+        assert parsed.packages[0].screenshots == ()
+
+    def test_the_picture_is_served_before_and_after_the_skin_is_installed(
+        self, tmp_path: Path
+    ) -> None:
+        small = picture(64)
+        repo = publish_with_preview(tmp_path, small)
+        inst = installer_for(tmp_path, repo, tmp_path / "skins")
+        assert inst.screenshot("dev/skin_ada", 0) == (small, "image/png")
+        assert inst.rows()[0][0].screenshots == 1
+        inst.install("dev/skin_ada")
+        for shot in repo.rglob("*--*"):  # the repository no longer matters
+            shot.unlink()
+        assert inst.screenshot("dev/skin_ada", 0) == (small, "image/png")
+        assert inst.screenshot("dev/skin_ada", 1) is None
+        assert inst.rows()[0][0].screenshots == 1
+
+    def test_an_installed_preview_that_is_too_big_is_served_shrunk(
+        self, tmp_path: Path
+    ) -> None:
+        repo = publish_with_preview(tmp_path, picture(2600))
+        inst = installer_for(tmp_path, repo, tmp_path / "skins")
+        inst.install("dev/skin_ada")
+        for shot in repo.rglob("*--*"):
+            shot.unlink()
+        served = inst.screenshot("dev/skin_ada", 0)
+        assert served is not None and 0 < len(served[0]) <= 2 * 1024 * 1024
+
+    def test_the_catalog_shows_a_skin_large_with_its_picture_as_the_icon(self) -> None:
+        script = (
+            Path(__file__).resolve().parent.parent
+            / "res/synth_webui/js/extension_store.js"
+        ).read_text(encoding="utf-8")
+        assert "skinPreview" in script and "skin-preview-large" in script
+        assert "x.kind === 'skins' && x.screenshots" in script
+
+
 class TestPlacement:
     def test_install_puts_the_skin_in_the_skins_directory_with_a_marker(
         self, tmp_path: Path

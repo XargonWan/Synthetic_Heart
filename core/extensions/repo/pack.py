@@ -127,8 +127,19 @@ def _publish_screenshots(archive: Path, repo_dir: Path) -> list[dict[str, object
     limit is left out."""
     import hashlib
 
+    from core.extensions.repo.previews import fit, preview_name
+
     published: list[dict[str, object]] = []
     with zipfile.ZipFile(archive) as bundle:
+        # A skin's own preview is its first picture (shrunk if it is too big).
+        pictures: list[tuple[str, bytes]] = []
+        for skin in read_archive_manifest(archive).provides.skins:
+            member = preview_name(bundle.namelist(), skin.path)
+            if member is None:
+                continue
+            fitted = fit(bundle.read(member), Path(member).suffix.lower())
+            if fitted is not None:
+                pictures.append((f"{skin.name}-preview{fitted[1]}", fitted[0]))
         names = sorted(
             info.filename
             for info in bundle.infolist()
@@ -138,11 +149,9 @@ def _publish_screenshots(archive: Path, repo_dir: Path) -> list[dict[str, object
             and info.filename.lower().endswith(SCREENSHOT_SUFFIXES)
             and 0 < info.file_size <= MAX_SCREENSHOT_BYTES
         )
-        for name in names[:MAX_SCREENSHOTS]:
-            data = bundle.read(name)
-            plain = "".join(
-                c if c.isalnum() or c in "._-" else "_" for c in name.split("/", 1)[1]
-            )
+        pictures.extend((name.split("/", 1)[1], bundle.read(name)) for name in names)
+        for name, data in pictures[:MAX_SCREENSHOTS]:
+            plain = "".join(c if c.isalnum() or c in "._-" else "_" for c in name)
             target = archive.with_name(f"{archive.stem}--{plain}")
             target.write_bytes(data)
             published.append(

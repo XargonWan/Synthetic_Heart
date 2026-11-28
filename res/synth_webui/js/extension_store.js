@@ -119,6 +119,7 @@
                 if (granted) await call('/grant', { id: body.id });
             }
             toast('Done');
+            readAgain = true;
             // The Skins page lists what is installed too: it redraws itself.
             document.dispatchEvent(new CustomEvent('synth-extensions-changed'));
         } catch (e) {
@@ -197,9 +198,14 @@
     // One state per catalog on the page: the Plugins one and the Skins one.
     const catalogState = { plugins: { selectedId: '', filter: '' }, skins: { selectedId: '', filter: '' } };
 
+    // A skin is known by its picture, as in the Skins tab: its preview is the first picture the
+    // repository (or its installed package) offers.
+    function skinPicture(x, n) { return BASE + '/screenshot/' + x.id + '/' + n; }
+
     function iconFor(x) {
         const img = el('img', { className: 'plugin-banner-icon', alt: '' });
-        img.src = x.installed ? BASE + '/icon/' + x.id : LOGO;
+        if (x.kind === 'skins' && x.screenshots) img.style.objectFit = 'cover';
+        img.src = x.kind === 'skins' && x.screenshots ? skinPicture(x, 0) : (x.installed ? BASE + '/icon/' + x.id : LOGO);
         img.onerror = () => { img.onerror = null; img.src = LOGO; };
         return img;
     }
@@ -240,12 +246,40 @@
 
     // The pictures a plugin comes with (the ``screenshots/`` folder of its package, in file
     // name order): a strip of thumbnails; a click shows one large.
-    function gallery(x) {
+    // A click on a picture shows it large.
+    function zoom(url, alt) {
+        const veil = el('div', {
+            style: 'position:fixed;inset:0;z-index:2000;background:rgba(0,0,0,.85);display:flex;align-items:center;justify-content:center;cursor:zoom-out',
+        });
+        const big = el('img', { alt, style: 'max-width:92vw;max-height:92vh;border-radius:8px' });
+        big.src = url;
+        veil.appendChild(big);
+        const close = () => { veil.remove(); document.removeEventListener('keydown', onKey); };
+        const onKey = (ev) => { if (ev.key === 'Escape') close(); };
+        veil.addEventListener('click', close);
+        document.addEventListener('keydown', onKey);
+        document.body.appendChild(veil);
+    }
+
+    // The preview of a skin, large, at the top of its details (like a card of the Skins tab).
+    function skinPreview(x) {
+        const img = el('img', {
+            alt: (x.name || x.id) + ' preview', className: 'skin-preview-large',
+            style: 'display:block;max-width:100%;max-height:380px;margin:12px 0;border-radius:10px;cursor:zoom-in;background:rgba(255,255,255,0.06)',
+        });
+        img.src = skinPicture(x, 0);
+        img.onerror = () => { img.remove(); };
+        img.addEventListener('click', () => zoom(img.src, img.alt));
+        return img;
+    }
+
+    // ``from``: the first picture to list (a skin's first one is already shown large).
+    function gallery(x, from) {
         const strip = el('div', {
             className: 'plugin-screenshots',
             style: 'display:flex;gap:10px;overflow-x:auto;margin:12px 0;padding-bottom:6px',
         });
-        for (let n = 0; n < x.screenshots; n += 1) {
+        for (let n = from || 0; n < x.screenshots; n += 1) {
             const url = BASE + '/screenshot/' + x.id + '/' + n;
             const thumb = el('img', {
                 alt: (x.name || x.id) + ' screenshot ' + (n + 1), loading: 'lazy',
@@ -253,19 +287,7 @@
             });
             thumb.src = url;
             thumb.onerror = () => { thumb.remove(); };
-            thumb.addEventListener('click', () => {
-                const veil = el('div', {
-                    style: 'position:fixed;inset:0;z-index:2000;background:rgba(0,0,0,.85);display:flex;align-items:center;justify-content:center;cursor:zoom-out',
-                });
-                const big = el('img', { alt: thumb.alt, style: 'max-width:92vw;max-height:92vh;border-radius:8px' });
-                big.src = url;
-                veil.appendChild(big);
-                const close = () => { veil.remove(); document.removeEventListener('keydown', onKey); };
-                const onKey = (ev) => { if (ev.key === 'Escape') close(); };
-                veil.addEventListener('click', close);
-                document.addEventListener('keydown', onKey);
-                document.body.appendChild(veil);
-            });
+            thumb.addEventListener('click', () => zoom(url, thumb.alt));
             strip.appendChild(thumb);
         }
         return strip;
@@ -289,7 +311,10 @@
         if (x.authors && x.authors.length) {
             pane.appendChild(el('div', { className: 'plugin-detail-author meta', textContent: 'By ' + x.authors.join(' and ') }));
         }
-        if (x.screenshots) pane.appendChild(gallery(x));
+        // A skin shows its own picture large; the strip holds the others.
+        const isSkin = x.kind === 'skins' && x.screenshots > 0;
+        if (isSkin) pane.appendChild(skinPreview(x));
+        if (x.screenshots > (isSkin ? 1 : 0)) pane.appendChild(gallery(x, isSkin ? 1 : 0));
         const facts = [
             ['Installed', x.installed || 'no'],
             ['Available', x.available ? x.available + (x.repo ? ' (' + x.repo + ')' : '') : '–'],
@@ -361,9 +386,15 @@
         return wrap;
     }
 
+    // A change (install, update, remove, a repository added or removed) and the Refresh button
+    // read the repositories' indexes again instead of the copy the Core kept.
+    let readAgain = false;
+
     async function overview(root, what) {
         try {
-            return await call('');
+            const fresh = readAgain;
+            readAgain = false;
+            return await call(fresh ? '?refresh=true' : '');
         } catch (e) {
             lastError = what + ' could not be read (' + e.message + ').';
             root.textContent = '';
@@ -375,13 +406,31 @@
         (data.problems || []).forEach((p) => root.appendChild(el('div', { className: 'component-error', textContent: p })));
     }
 
+    // The Refresh button of Catalog and Repositories: asks the repositories again.
+    function refreshBar() {
+        const button = el('button', {
+            type: 'button', className: 'filter-refresh-btn', title: 'Refresh: read the repositories again',
+            textContent: '🔄',
+        });
+        button.setAttribute('aria-label', 'Refresh');
+        button.addEventListener('click', async () => {
+            button.disabled = true;
+            readAgain = true;
+            start(true);
+            await loadUpdates(true);
+        });
+        return el('div', { style: 'display:flex;justify-content:flex-end;margin-bottom:8px' }, [button]);
+    }
+
     async function renderCatalog(root, scope) {
         const data = await overview(root, 'The catalog');
         if (!data) {
+            root.appendChild(refreshBar());
             root.appendChild(el('div', { className: 'component-error', textContent: lastError }));
             return;
         }
         root.textContent = '';
+        root.appendChild(refreshBar());
         problems(data, root);
         const offered = data.extensions.filter((x) => (x.kind === 'skins') === (scope === 'skins'));
         if (!offered.length) {
@@ -397,11 +446,13 @@
         const data = await overview(root, 'The repositories');
         if (!data) {
             // Say why, and keep the way to add a repository: that is what fixes it.
+            root.appendChild(refreshBar());
             root.appendChild(el('div', { className: 'component-error', textContent: lastError }));
             root.appendChild(repoForm(root));
             return;
         }
         root.textContent = '';
+        root.appendChild(refreshBar());
         problems(data, root);
         root.appendChild(repoTable(data, root));
         root.appendChild(repoForm(root));
@@ -455,6 +506,7 @@
     }
 
     function reloadComponents() {
+        readAgain = true; // something changed: the indexes are read again, not the kept copy
         const hub = window.SynthWebUI;
         if (hub && typeof hub.loadEnginesSummary === 'function') hub.loadEnginesSummary();
         start(true);
