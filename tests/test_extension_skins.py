@@ -236,20 +236,38 @@ class TestWebuiSkins:
 class TestSkinsTabScripts:
     root = Path(__file__).resolve().parent.parent / "res/synth_webui"
 
-    def test_the_skins_tab_offers_repository_skins_and_uninstalls_extension_ones(
-        self,
-    ) -> None:
-        script = (self.root / "js/skins-ui.js").read_text(encoding="utf-8")
-        assert "x.kind === 'skins'" in script and "'/install'" in script
-        assert "'/remove'" in script and "s.extension_id" in script
-        # the bundled skins are never offered a delete button
-        assert "folder !== 'Rei' && folder !== 'Zero'" in script
+    def test_the_skins_page_has_the_same_three_tabs_as_plugins(self) -> None:
         html = (
             Path(__file__).resolve().parent.parent
             / "core/webui_templates/sections/skins.html"
         ).read_text(encoding="utf-8")
-        assert 'id="skins-catalog"' in html
+        for tab in ("installed", "catalog", "repositories"):
+            assert f'data-skins-subtab="{tab}"' in html
+        # the catalog and the repositories are the Plugins store's own views
+        assert 'id="skins-extension-catalog"' in html
+        assert 'id="skins-extension-repositories"' in html
+
+    def test_the_skins_tab_uninstalls_extension_skins_and_follows_the_catalog(
+        self,
+    ) -> None:
+        script = (self.root / "js/skins-ui.js").read_text(encoding="utf-8")
+        assert "'/remove'" in script and "s.extension_id" in script
+        # installing and updating are the catalog's job; the grid redraws when it changes
+        assert "synth-extensions-changed" in script and "'/install'" not in script
+        # the bundled skins are never offered a delete button
+        assert "folder !== 'Rei' && folder !== 'Zero'" in script
+
+    def test_the_store_script_draws_a_skins_only_catalog_and_the_same_repositories(
+        self,
+    ) -> None:
+        script = (self.root / "js/extension_store.js").read_text(encoding="utf-8")
+        assert (
+            "skins-extension-catalog" in script
+            and "skins-extension-repositories" in script
+        )
+        assert "(x.kind === 'skins') === wantSkins" in script
+        assert "synth-extensions-changed" in script
 
     def test_the_plugins_catalog_leaves_skins_to_the_skins_tab(self) -> None:
         script = (self.root / "js/extension_store.js").read_text(encoding="utf-8")
-        assert "x.kind !== 'skins'" in script
+        assert "(x.kind === 'skins') === wantSkins" in script and "'plugins'" in script

@@ -1317,9 +1317,16 @@
             padding-top: 0.75rem;
             margin-top: 0.5rem;
         }
+        /* The guide is reference text: small, with headings that do not shout. */
+        .plugin-detail-guide { font-size: 0.82rem; line-height: 1.45; }
         .plugin-detail-guide h1,
         .plugin-detail-guide h2,
-        .plugin-detail-guide h3 { margin: 0.6rem 0 0.3rem; }
+        .plugin-detail-guide h3 { margin: 0.5rem 0 0.25rem; line-height: 1.25; }
+        .plugin-detail-guide h1 { font-size: 1.05rem; }
+        .plugin-detail-guide h2 { font-size: 0.95rem; }
+        .plugin-detail-guide h3 { font-size: 0.88rem; }
+        .plugin-detail-guide p, .plugin-detail-guide li { margin: 0.25rem 0; }
+        .plugin-detail-guide code, .plugin-detail-guide pre { font-size: 0.78rem; }
         .plugin-detail-guide code {
             background: rgba(255, 255, 255, 0.08);
             padding: 0.1rem 0.3rem;
@@ -1334,8 +1341,8 @@
         .plugin-detail-guide table {
             border-collapse: collapse;
             width: 100%;
-            margin: 0.6rem 0;
-            font-size: 0.9rem;
+            margin: 0.5rem 0;
+            font-size: 0.78rem;
         }
         .plugin-detail-guide th,
         .plugin-detail-guide td {
@@ -1879,6 +1886,7 @@ window.__SYNTH_CONFIG = {
     <button id="synth-install-btn" title="Install Synthetic Heart" aria-label="Install Synthetic Heart">⬇️</button>
     <script src="/js/utils.js"></script>
     <script src="/js/ui-helpers.js"></script>
+    <script src="/js/synth-dialog.js"></script>
     <script src="/js/vendor/winbox.min.js"></script>
     <script src="/js/webui-bootstrap.js"></script>
     <script src="/js/settings.js?v=%%STATIC_VERSION%%"></script>

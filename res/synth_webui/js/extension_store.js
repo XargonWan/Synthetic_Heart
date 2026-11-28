@@ -26,26 +26,101 @@
         return node;
     }
 
+    // Questions are a modal inside Synth (synth-dialog.js), never the browser's own box.
+    function ask(options) {
+        if (window.SynthDialog) return window.SynthDialog.confirm(options);
+        return Promise.resolve(window.confirm([options.title, options.message, options.question].filter(Boolean).join('\n\n')));
+    }
+
     function toast(message, isError) {
         if (window.showToast) window.showToast(message, !!isError);
     }
 
-    async function act(path, body, root, confirmText) {
+    // While an install or an update runs, the buttons give way to a bar in the highlight
+    // colour with the percentage: the Core says how far it has got (GET /progress).
+    async function withProgress(host, extensionId, run) {
+        const saved = Array.from(host.childNodes);
+        host.textContent = '';
+        const track = el('div', {
+            className: 'install-progress',
+            style: 'position:relative;height:28px;min-width:260px;flex:1;border-radius:14px;overflow:hidden;background:rgba(255,255,255,0.12)',
+        });
+        track.setAttribute('role', 'progressbar');
+        track.setAttribute('aria-valuemin', '0');
+        track.setAttribute('aria-valuemax', '100');
+        const fill = el('div', {
+            style: 'position:absolute;top:0;bottom:0;left:0;width:0%;background:var(--accent);transition:width .25s ease',
+        });
+        const label = el('div', {
+            style: 'position:relative;text-align:center;line-height:28px;font-size:.85rem;font-weight:700;color:#fff;text-shadow:0 0 3px rgba(0,0,0,.9),0 0 6px rgba(0,0,0,.6)',
+            textContent: '0%',
+        });
+        track.appendChild(fill);
+        track.appendChild(label);
+        host.appendChild(track);
+        const show = (percent, phase) => {
+            const n = Math.max(0, Math.min(100, Math.round(percent)));
+            fill.style.width = n + '%';
+            track.setAttribute('aria-valuenow', String(n));
+            label.textContent = n + '%' + (phase ? ' · ' + phase : '');
+        };
+        let busy = false;
+        const timer = setInterval(async () => {
+            if (busy) return;
+            busy = true;
+            try {
+                const data = await call('/progress');
+                const mine = (data.operations || {})[extensionId];
+                if (mine) show(mine.percent, mine.phase);
+            } catch (e) { /* the bar just stays where it was */ }
+            busy = false;
+        }, 300);
+        let result;
         try {
-            let result = await call(path, body);
+            result = await run();
+            return result;
+        } finally {
+            clearInterval(timer);
+            if (result && result.ok) {
+                show(100, 'Done');
+            } else {
+                host.textContent = '';
+                saved.forEach((node) => host.appendChild(node));
+            }
+        }
+    }
+
+    async function act(path, body, root, confirmText, progressHost) {
+        const tracked = progressHost && (path === '/install' || path === '/update') && body && body.id;
+        const run = (b) => (tracked ? withProgress(progressHost, body.id, () => call(path, b)) : call(path, b));
+        try {
+            let result = await run(body);
             if (result.needs_confirmation) {
-                if (!window.confirm(result.error + '\n\n' + (confirmText || 'Continue?'))) return;
-                result = await call(path, Object.assign({}, body, { confirm_untrusted: true }));
+                const go = await ask({
+                    title: 'Install from an untrusted repository?',
+                    message: result.error,
+                    question: confirmText || 'Continue?',
+                    confirmLabel: 'Continue',
+                });
+                if (!go) return;
+                result = await run(Object.assign({}, body, { confirm_untrusted: true }));
             }
             if (!result.ok) { toast(result.error || 'Failed', true); return; }
             (result.warnings || []).forEach((w) => toast(w, true));
             if (result.requested && result.requested.length && !(result.granted || []).length) {
-                const wants = result.requested.join(', ');
-                if (window.confirm('This extension asks for: ' + wants + '\n\nGrant these capabilities now?')) {
-                    await call('/grant', { id: body.id });
-                }
+                const granted = await ask({
+                    title: 'Permissions',
+                    message: 'This extension asks for:',
+                    details: result.requested,
+                    question: 'Grant these capabilities now?',
+                    confirmLabel: 'Grant',
+                    cancelLabel: 'Not now',
+                });
+                if (granted) await call('/grant', { id: body.id });
             }
             toast('Done');
+            // The Skins page lists what is installed too: it redraws itself.
+            document.dispatchEvent(new CustomEvent('synth-extensions-changed'));
         } catch (e) {
             toast('Extensions: ' + e.message, true);
         }
@@ -102,10 +177,13 @@
                     ? [el('span', { className: 'meta', textContent: 'built in' })]
                     : [el('button', {
                         className: 'pill', textContent: 'Remove',
-                        onclick: () => {
-                            if (window.confirm('Remove the repository "' + r.name + '"? What it installed stays installed.')) {
-                                act('/repo/remove', { name: r.name }, root);
-                            }
+                        onclick: async () => {
+                            const yes = await ask({
+                                title: 'Remove the repository "' + r.name + '"?',
+                                message: 'What it installed stays installed.',
+                                confirmLabel: 'Remove', danger: true,
+                            });
+                            if (yes) act('/repo/remove', { name: r.name }, root);
                         },
                     })]),
             ]));
@@ -116,8 +194,8 @@
     // ---- Catalog: like Installed, a list with icons on the left, the details on the right ----
 
     const LOGO = '/static/synth_logo_bg.png';
-    let selectedId = '';
-    let catalogFilter = '';
+    // One state per catalog on the page: the Plugins one and the Skins one.
+    const catalogState = { plugins: { selectedId: '', filter: '' }, skins: { selectedId: '', filter: '' } };
 
     function iconFor(x) {
         const img = el('img', { className: 'plugin-banner-icon', alt: '' });
@@ -136,7 +214,7 @@
         return tags;
     }
 
-    function listItem(x, select) {
+    function listItem(x, select, selectedId) {
         const item = el('div', { className: 'plugin-banner' + (x.id === selectedId ? ' selected' : '') });
         item.setAttribute('role', 'option');
         item.tabIndex = 0;
@@ -160,6 +238,39 @@
         return item;
     }
 
+    // The pictures a plugin comes with (the ``screenshots/`` folder of its package, in file
+    // name order): a strip of thumbnails; a click shows one large.
+    function gallery(x) {
+        const strip = el('div', {
+            className: 'plugin-screenshots',
+            style: 'display:flex;gap:10px;overflow-x:auto;margin:12px 0;padding-bottom:6px',
+        });
+        for (let n = 0; n < x.screenshots; n += 1) {
+            const url = BASE + '/screenshot/' + x.id + '/' + n;
+            const thumb = el('img', {
+                alt: (x.name || x.id) + ' screenshot ' + (n + 1), loading: 'lazy',
+                style: 'height:150px;border-radius:8px;cursor:zoom-in;flex:none;background:rgba(255,255,255,0.06)',
+            });
+            thumb.src = url;
+            thumb.onerror = () => { thumb.remove(); };
+            thumb.addEventListener('click', () => {
+                const veil = el('div', {
+                    style: 'position:fixed;inset:0;z-index:2000;background:rgba(0,0,0,.85);display:flex;align-items:center;justify-content:center;cursor:zoom-out',
+                });
+                const big = el('img', { alt: thumb.alt, style: 'max-width:92vw;max-height:92vh;border-radius:8px' });
+                big.src = url;
+                veil.appendChild(big);
+                const close = () => { veil.remove(); document.removeEventListener('keydown', onKey); };
+                const onKey = (ev) => { if (ev.key === 'Escape') close(); };
+                veil.addEventListener('click', close);
+                document.addEventListener('keydown', onKey);
+                document.body.appendChild(veil);
+            });
+            strip.appendChild(thumb);
+        }
+        return strip;
+    }
+
     function detail(x, root) {
         const pane = el('div', { className: 'plugin-detail' });
         const head = el('div', { style: 'display:flex;align-items:center;gap:14px;margin-bottom:10px' });
@@ -178,6 +289,7 @@
         if (x.authors && x.authors.length) {
             pane.appendChild(el('div', { className: 'plugin-detail-author meta', textContent: 'By ' + x.authors.join(' and ') }));
         }
+        if (x.screenshots) pane.appendChild(gallery(x));
         const facts = [
             ['Installed', x.installed || 'no'],
             ['Available', x.available ? x.available + (x.repo ? ' (' + x.repo + ')' : '') : '–'],
@@ -188,30 +300,35 @@
         const tags = tagsOf(x);
         if (tags.length) pane.appendChild(el('div', { className: 'plugins-update-count', textContent: tags.join(' · '), style: 'margin-bottom:10px' }));
         const buttons = el('div', { style: 'display:flex;flex-wrap:wrap;gap:8px' });
-        const button = (label, path, body, confirmText) => buttons.appendChild(el('button', {
-            className: 'pill', type: 'button', textContent: label,
-            onclick: () => act(path, body, root, confirmText),
+        const button = (label, path, body, confirmText, className) => buttons.appendChild(el('button', {
+            className: className || 'pill', type: 'button', textContent: label,
+            onclick: () => act(path, body, root, confirmText, buttons),
         }));
+        // Turning a plugin on or off is the toggle of the Installed tab, not a button here.
         if (!x.installed) {
             button('Install', '/install', { id: x.id });
         } else {
             if (x.update) button('Update to ' + x.available, '/update', { id: x.id });
-            button(x.enabled ? 'Turn off' : 'Turn on', x.enabled ? '/disable' : '/enable', { id: x.id });
-            button('Roll back', '/rollback', { id: x.id });
-            button('Uninstall', '/remove', { id: x.id }, 'Its data is removed with it.');
+            // Only when an update left the version before it to go back to.
+            if (x.previous) button('Roll back to ' + x.previous, '/rollback', { id: x.id });
+            button('Uninstall', '/remove', { id: x.id }, 'Its data is removed with it.', 'pill btn-danger');
         }
         pane.appendChild(buttons);
         return pane;
     }
 
-    function catalogView(data, root) {
-        // Skins are listed in the Skins tab, not here.
-        const all = data.extensions.filter((x) => x.kind !== 'skins').sort((a, b) => (a.name || a.id).localeCompare(b.name || b.id));
-        if (!selectedId || !all.some((x) => x.id === selectedId)) selectedId = all.length ? all[0].id : '';
+    // ``scope`` is "plugins" (everything but skins) or "skins" (only skins): the same list,
+    // the same details, the same buttons, in two places of the WebUI.
+    function catalogView(data, root, scope) {
+        const state = catalogState[scope];
+        const wantSkins = scope === 'skins';
+        const all = data.extensions.filter((x) => (x.kind === 'skins') === wantSkins).sort((a, b) => (a.name || a.id).localeCompare(b.name || b.id));
+        if (!state.selectedId || !all.some((x) => x.id === state.selectedId)) state.selectedId = all.length ? all[0].id : '';
+        const noun = wantSkins ? 'skin' : 'extension';
         const wrap = el('div', { className: 'catalog-two-col', style: 'display:grid;grid-template-columns:minmax(220px,340px) 1fr;gap:18px;align-items:start;margin-top:10px' });
         const left = el('div');
         const search = el('input', {
-            type: 'search', placeholder: 'Search the catalog…', value: catalogFilter,
+            type: 'search', placeholder: 'Search the catalog…', value: state.filter,
             className: 'plugins-search-input', style: 'margin-bottom:10px;width:100%',
         });
         const list = el('div', { className: 'plugin-list', style: 'display:flex;flex-direction:column;gap:6px' });
@@ -219,22 +336,23 @@
         const right = el('div', { className: 'plugin-detail-pane' });
         const draw = () => {
             list.textContent = '';
-            const needle = catalogFilter.trim().toLowerCase();
+            const needle = state.filter.trim().toLowerCase();
             const shown = all.filter((x) => !needle || (x.name + ' ' + x.id + ' ' + x.description).toLowerCase().includes(needle));
+            // What can be installed comes before what already is.
             const groups = [['Updates', shown.filter((x) => x.update)],
-                ['Installed', shown.filter((x) => x.installed && !x.update)],
-                ['Available', shown.filter((x) => !x.installed)]];
+                ['Available', shown.filter((x) => !x.installed)],
+                ['Installed', shown.filter((x) => x.installed && !x.update)]];
             groups.forEach(([label, items]) => {
                 if (!items.length) return;
                 list.appendChild(el('div', { className: 'plugin-category-header', textContent: label, style: 'margin-top:6px' }));
-                items.forEach((x) => list.appendChild(listItem(x, (id) => { selectedId = id; draw(); })));
+                items.forEach((x) => list.appendChild(listItem(x, (id) => { state.selectedId = id; draw(); }, state.selectedId)));
             });
             if (!shown.length) list.appendChild(el('div', { className: 'meta', textContent: 'Nothing matches.' }));
             right.textContent = '';
-            const current = all.find((x) => x.id === selectedId);
-            right.appendChild(current ? detail(current, root) : el('div', { className: 'meta', textContent: 'Select an extension on the left to see what it is.' }));
+            const current = all.find((x) => x.id === state.selectedId);
+            right.appendChild(current ? detail(current, root) : el('div', { className: 'meta', textContent: 'Select a ' + noun + ' on the left to see what it is.' }));
         };
-        search.addEventListener('input', () => { catalogFilter = search.value; draw(); });
+        search.addEventListener('input', () => { state.filter = search.value; draw(); });
         left.appendChild(search);
         left.appendChild(list);
         wrap.appendChild(left);
@@ -257,7 +375,7 @@
         (data.problems || []).forEach((p) => root.appendChild(el('div', { className: 'component-error', textContent: p })));
     }
 
-    async function renderCatalog(root) {
+    async function renderCatalog(root, scope) {
         const data = await overview(root, 'The catalog');
         if (!data) {
             root.appendChild(el('div', { className: 'component-error', textContent: lastError }));
@@ -265,13 +383,14 @@
         }
         root.textContent = '';
         problems(data, root);
-        if (!data.extensions.length) {
+        const offered = data.extensions.filter((x) => (x.kind === 'skins') === (scope === 'skins'));
+        if (!offered.length) {
             root.appendChild(el('div', { className: 'meta', textContent: data.repositories.length
                 ? 'Nothing is offered by your repositories.'
                 : 'Nothing is offered yet: add a repository in the Repositories tab.' }));
             return;
         }
-        root.appendChild(catalogView(data, root));
+        root.appendChild(catalogView(data, root, scope));
     }
 
     async function renderRepositories(root) {
@@ -381,7 +500,12 @@
         node.style.marginTop = '8px';
         node.addEventListener('click', async () => {
             const what = label || extensionId;
-            if (!window.confirm('Uninstall ' + what + '?\n\nIts files and its data are removed.')) return;
+            const yes = await ask({
+                title: 'Uninstall ' + what + '?',
+                message: 'Its files and its data are removed.',
+                confirmLabel: 'Uninstall', danger: true,
+            });
+            if (!yes) return;
             node.disabled = true;
             try {
                 const result = await call('/remove', { id: extensionId });
@@ -398,6 +522,7 @@
     }
 
     window.SynthExtensionUpdates = { button: updateButton, refresh: loadUpdates, uninstallButton };
+    window.SynthExtensionStore = { refresh: () => start(true) };
 
     // The Plugins section is drawn again on every visit: fill the bar whenever it appears.
     let barTimer = null;
@@ -410,7 +535,11 @@
     }).observe(document.documentElement, { childList: true, subtree: true });
 
     function start(refresh) {
-        [['extension-catalog', renderCatalog], ['extension-repositories', renderRepositories]].forEach(([id, draw]) => {
+        // The Skins page has its own catalog (skins only) and shows the same repositories.
+        [['extension-catalog', (h) => renderCatalog(h, 'plugins')],
+            ['skins-extension-catalog', (h) => renderCatalog(h, 'skins')],
+            ['extension-repositories', renderRepositories],
+            ['skins-extension-repositories', renderRepositories]].forEach(([id, draw]) => {
             const host = document.getElementById(id);
             if (host && (refresh || !host.dataset.ready)) { host.dataset.ready = '1'; draw(host); }
         });
@@ -419,7 +548,7 @@
     // Opening either tab shows the current state, not what it was at page load.
     document.addEventListener('click', (ev) => {
         const t = ev.target;
-        if (t && t.matches && t.matches('.plugins-subnav-btn[data-plugins-subtab="catalog"], .plugins-subnav-btn[data-plugins-subtab="repositories"]')) {
+        if (t && t.matches && t.matches('.plugins-subnav-btn[data-plugins-subtab="catalog"], .plugins-subnav-btn[data-plugins-subtab="repositories"], .skins-subnav-btn[data-skins-subtab="catalog"], .skins-subnav-btn[data-skins-subtab="repositories"], .nav-btn[data-tab="skins"]')) {
             setTimeout(() => start(true), 0);
         }
     });

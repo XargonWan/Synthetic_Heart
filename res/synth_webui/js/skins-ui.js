@@ -126,7 +126,7 @@
             if(!res.ok) throw new Error('Activate failed');
             await fetchSkins();
             if(window.refreshModels) await window.refreshModels();
-        }catch(e){ alert('Error: '+e.message); }
+        }catch(e){ notify('Error: '+e.message); }
     }
 
     async function clearUploaded(){
@@ -135,8 +135,8 @@
             if(!res.ok) throw new Error('Clear failed');
             await fetchSkins();
             if(window.refreshModels) await window.refreshModels();
-            alert('Restored default Rei VRM');
-        }catch(e){ alert('Error: '+e.message); }
+            notify('Restored default Rei VRM');
+        }catch(e){ notify('Error: '+e.message); }
     }
 
     // ----------------------------------------------------------------
@@ -156,7 +156,7 @@
             }
             await fetchSkins();
             return true;
-        }catch(e){ alert('Error: '+e.message); return false; }
+        }catch(e){ notify('Error: '+e.message); return false; }
     }
 
     async function uploadSkinVrm(skinName, file){
@@ -170,7 +170,7 @@
             }
             await fetchSkins();
             if(window.refreshModels) await window.refreshModels();
-        }catch(e){ alert('Error: '+e.message); }
+        }catch(e){ notify('Error: '+e.message); }
     }
 
     async function uploadSkinPreview(skinName, file){
@@ -183,7 +183,18 @@
                 throw new Error(err.detail || 'Upload failed');
             }
             await fetchSkins();
-        }catch(e){ alert('Error: '+e.message); }
+        }catch(e){ notify('Error: '+e.message); }
+    }
+
+    // Questions and notices are a modal inside Synth (synth-dialog.js), not the browser's box.
+    function askConfirm(options){
+        if(window.SynthDialog) return window.SynthDialog.confirm(options);
+        return Promise.resolve(window.confirm([options.title, options.message].filter(Boolean).join('\n\n')));
+    }
+    function notify(message){
+        const text = String(message);
+        if(window.SynthDialog) { window.SynthDialog.alert(text, /^(Error|Failed)/.test(text) ? 'Something went wrong' : ''); return; }
+        window.alert(text);
     }
 
     function downloadSkin(skinName){
@@ -201,11 +212,11 @@
             }
             await fetchSkins();
             if(window.refreshModels) await window.refreshModels();
-        }catch(e){ alert('Error: '+e.message); }
+        }catch(e){ notify('Error: '+e.message); }
     }
 
     async function deleteSkin(skinName){
-        if(!confirm(`Delete skin "${skinName}"? This cannot be undone.`)) return;
+        if(!await askConfirm({title:`Delete skin "${skinName}"?`, message:'This cannot be undone.', confirmLabel:'Delete', danger:true})) return;
         try{
             const res = await fetch(_apiBase + `/api/skins/${encodeURIComponent(skinName)}`, {method:'DELETE'});
             if(!res.ok){
@@ -213,7 +224,7 @@
                 throw new Error(err.detail || 'Delete failed');
             }
             await fetchSkins();
-        }catch(e){ alert('Error: '+e.message); }
+        }catch(e){ notify('Error: '+e.message); }
     }
 
     // ----------------------------------------------------------------
@@ -230,88 +241,34 @@
         return res.json();
     }
 
-    function textEl(tag, text, cls){
-        const n = document.createElement(tag); n.textContent = text || '';
-        if(cls) n.className = cls;
-        return n;
-    }
-
     async function uninstallSkin(skin){
-        if(!confirm(`Uninstall skin "${skin.name}"? Its files are removed.`)) return;
+        if(!await askConfirm({title:`Uninstall skin "${skin.name}"?`, message:'Its files are removed.', confirmLabel:'Uninstall', danger:true})) return;
         try{
             const out = await storeCall('/remove', {id: skin.extension_id});
             if(!out.ok) throw new Error(out.error || 'Uninstall failed');
-            await refreshSkins();
-        }catch(e){ alert('Error: '+e.message); }
+            await fetchSkins();
+            if(window.SynthExtensionStore) window.SynthExtensionStore.refresh();
+        }catch(e){ notify('Error: '+e.message); }
     }
 
-    async function installSkin(id, button){
-        button.disabled = true;
-        try{
-            const out = await storeCall('/install', {id});
-            if(out.needs_confirmation){
-                if(!confirm(out.error + '\n\nInstall anyway?')) { button.disabled = false; return; }
-                const again = await storeCall('/install', {id, confirm_untrusted: true});
-                if(!again.ok) throw new Error(again.error || 'Install failed');
-            } else if(!out.ok) {
-                throw new Error(out.error || 'Install failed');
-            }
-            await refreshSkins();
-        }catch(e){ alert('Error: '+e.message); button.disabled = false; }
-    }
+    // Installing and updating are done in the Catalog tab (the Plugins store's own view).
+    // Whatever it changes, the Installed grid follows.
+    document.addEventListener('synth-extensions-changed', () => { fetchSkins(); });
 
-    async function fetchSkinCatalog(){
-        const host = document.getElementById('skins-catalog');
-        if(!host) return;
-        host.textContent = '';
-        let data;
-        try{
-            data = await storeCall('');
-        }catch(e){
-            host.appendChild(textEl('div', 'The skin catalog could not be read (' + e.message + ').', 'meta'));
-            return;
-        }
-        (data.problems || []).forEach(p => host.appendChild(textEl('div', p, 'component-error')));
-        const offered = (data.extensions || []).filter(x => x.kind === 'skins' && !x.installed);
-        const updates = (data.extensions || []).filter(x => x.kind === 'skins' && x.update);
-        if(!offered.length && !updates.length){
-            host.appendChild(textEl('div', data.repositories && data.repositories.length
-                ? 'No more skins are offered by your repositories.'
-                : 'No repositories yet: add one in Plugins > Repositories.', 'meta'));
-            return;
-        }
-        const grid = document.createElement('div'); grid.className = 'skins-grid';
-        updates.concat(offered).forEach(x => {
-            const card = document.createElement('div'); card.className = 'skin-card';
-            card.appendChild(textEl('strong', x.name || x.id));
-            const meta = document.createElement('div'); meta.className = 'skin-meta';
-            if(x.authors && x.authors.length) meta.appendChild(textEl('div', 'by ' + x.authors.join(', '), 'skin-author'));
-            if(x.description) meta.appendChild(textEl('div', x.description, 'skin-description'));
-            meta.appendChild(textEl('div', 'v' + x.available + (x.repo ? ' · ' + x.repo : ''), 'skin-version'));
-            card.appendChild(meta);
-            const actions = document.createElement('div'); actions.className = 'skin-actions';
-            const btn = document.createElement('button'); btn.className = 'btn-primary';
-            btn.textContent = x.installed ? 'Update to ' + x.available : 'Install';
-            btn.addEventListener('click', () => x.installed ? updateSkin(x.id, btn) : installSkin(x.id, btn));
-            actions.appendChild(btn); card.appendChild(actions);
-            grid.appendChild(card);
+    // The Installed / Catalog / Repositories bar (same behaviour as the Plugins one).
+    document.addEventListener('click', (ev) => {
+        const btn = ev.target && ev.target.closest ? ev.target.closest('.skins-subnav-btn[data-skins-subtab]') : null;
+        if(!btn) return;
+        const next = btn.dataset.skinsSubtab || 'installed';
+        document.querySelectorAll('.skins-subnav-btn[data-skins-subtab]').forEach(b => {
+            const active = b.dataset.skinsSubtab === next;
+            b.classList.toggle('active', active);
+            b.setAttribute('aria-selected', active ? 'true' : 'false');
         });
-        host.appendChild(grid);
-    }
-
-    async function updateSkin(id, button){
-        button.disabled = true;
-        try{
-            const out = await storeCall('/update', {id});
-            if(!out.ok) throw new Error(out.error || 'Update failed');
-            await refreshSkins();
-        }catch(e){ alert('Error: '+e.message); button.disabled = false; }
-    }
-
-    async function refreshSkins(){
-        await fetchSkins();
-        await fetchSkinCatalog();
-    }
+        document.querySelectorAll('.skins-subpanel[data-skins-subtab]').forEach(panel => {
+            panel.classList.toggle('active', panel.dataset.skinsSubtab === next);
+        });
+    });
 
     // ----------------------------------------------------------------
     // Init: wire up buttons
@@ -325,7 +282,7 @@
 
             // Nav skins tab click
             const navSkins = document.querySelector('.nav-btn[data-tab="skins"]');
-            if(navSkins) navSkins.addEventListener('click', function(){ fetchSkins(); fetchSkinCatalog(); });
+            if(navSkins) navSkins.addEventListener('click', function(){ fetchSkins(); });
 
             // set up upload input handler once element exists
             const skinUpload = document.getElementById('skin-vrm-upload');
@@ -344,10 +301,10 @@
                                 throw new Error(`HTTP ${res.status}: ${txt}`);
                             }
                             console.log('[skins-ui] VRM upload successful');
-                            try{ alert('VRM uploaded successfully'); }catch(_){ }
+                            try{ notify('VRM uploaded successfully'); }catch(_){ }
                         } catch (err) {
                             console.error('[skins-ui] VRM upload failed', err);
-                            alert('Failed to upload VRM: ' + err.message);
+                            notify('Failed to upload VRM: ' + err.message);
                         }
                     }
                     try{ e.target.value = ''; }catch(_){ }
@@ -379,7 +336,7 @@
             if(createBtn){
                 createBtn.addEventListener('click', async ()=>{
                     const name = (document.getElementById('skin-form-name') || {}).value || '';
-                    if(!name.trim()){ alert('Skin name is required'); return; }
+                    if(!name.trim()){ notify('Skin name is required'); return; }
                     const data = {
                         name: name.trim(),
                         author: (document.getElementById('skin-form-author') || {}).value || '',
@@ -416,7 +373,6 @@
 
     // Export for other modules
     window.fetchSkins = window.fetchSkins || fetchSkins;
-    window.fetchSkinCatalog = window.fetchSkinCatalog || fetchSkinCatalog;
     window.renderSkins = window.renderSkins || renderSkins;
     window.activateSkin = window.activateSkin || activateSkin;
     window.clearUploadedSkins = window.clearUploadedSkins || clearUploaded;

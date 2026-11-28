@@ -1,3 +1,17 @@
+### feat(webui): screenshots in the catalog, a progress bar for installs, questions as an in-app modal
+
+**Screenshots.** A plugin can ship a `screenshots/` folder (up to 8 pictures of at most 2 MB, shown in file-name order). They are published next to the package, listed in the signed index with their SHA-256, and shown in the catalog before the plugin is installed (a click shows one large).
+
+**Progress.** Install and Update turn into a bar in the highlight colour with the percentage while they run (`GET /api/extensions/store/progress`).
+
+**Dialogs.** The permission question ("This extension asks for ... Grant these capabilities now?"), the untrusted-repository question and every uninstall/remove question are a modal inside Synth (`synth-dialog.js`), not the browser's own box.
+
+**Fixed.** An extension could be offered an update for ever: the marker looked at the newest version in any repository while Update installs from the repository it came from. Both use the repository it came from now. The More menu closes the collapsed (hamburger) menu when an entry is chosen. The plugin guide text is smaller. The catalog lists Available before Installed; its Uninstall button is red; Turn off is only the toggle of the Installed tab; Roll back names the version it returns to and appears only after an update.
+
+**Skins** have the same Installed / Catalog / Repositories tabs as Plugins; Catalog shows skins only and Repositories is the same frame.
+
+**Location.** `core/extensions/repo/{progress,index,pack,installer}.py`, `core/extensions/webui_store.py`, `res/synth_webui/js/{synth-dialog,extension_store,extension_slots,skins-ui}.js`, `core/webui_templates/`.
+
 ### refactor(docker): a slim image; the official repository is built in; SearXNG is its own container
 
 **The image.** Multi-stage: the Python environment is built in a throwaway stage (no dev dependencies, no uv cache, no compiler) and only `/app/venv` is copied. The runtime image keeps `tini`, TLS, `openssl`, `git`, `ffmpeg`, `postgresql-client` and the headless-GL libraries; it no longer has Node.js (only the Minecraft Vessel used it; it will carry its own when it becomes an extension), MariaDB client and headers (the legacy MariaDB drivers are pure Python), vim, nano, htop, ping, wget, unzip, espeak (the KittenTTS extension brings its own), Debian's own Python 3.13 and the compilers. The build no longer needs Node, and the image no longer holds the extensions, `docs/`, `.gitnexus/`, `.synth-ab/`, `data/`, the second copy of Rei, or the S6 overlay. PID 1 is `tini`; `container/entrypoint.sh` does what the S6 run script did.

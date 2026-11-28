@@ -414,3 +414,58 @@ class TestPresentation:
         assert "uninstallButton" in store and "btn-danger" in store
         assert "'/remove'" in store
         assert "uninstallButton(" in main and "item.extension_id" in main
+
+
+def test_choosing_an_entry_of_more_closes_the_menu_and_the_collapsed_nav() -> None:
+    """The collapsed (hamburger) menu closes when a tab is chosen; an entry of More is a
+    page too, so it must close both the More menu and that panel."""
+    script = (
+        Path(__file__).resolve().parent.parent / "res/synth_webui/js/extension_slots.js"
+    ).read_text(encoding="utf-8")
+    assert (
+        "item.addEventListener('click', () => { closeMenu(); closeNav(); openWindow(entry); });"
+        in script
+    )
+    assert (
+        "classList.remove('nav-open')" in script
+        and "'aria-expanded', 'false'" in script
+    )
+
+
+class TestQuestionsAreAnInAppModal:
+    """The browser's own confirm()/alert() ("localhost:8000 says") sits outside Synth: the
+    store and skins flows ask inside it, with synth-dialog.js."""
+
+    root = Path(__file__).resolve().parent.parent
+
+    def test_the_dialog_script_is_loaded_before_the_scripts_that_use_it(self) -> None:
+        for page in ("synth_webui_shell.html", "synth_webui_index.html"):
+            html = (self.root / "core/webui_templates" / page).read_text(
+                encoding="utf-8"
+            )
+            assert "/js/synth-dialog.js" in html
+            if page == "synth_webui_shell.html":  # the one the runtime serves
+                assert html.index("synth-dialog.js") < html.index("skins-ui.js")
+        script = (self.root / "res/synth_webui/js/synth-dialog.js").read_text(
+            encoding="utf-8"
+        )
+        assert "role" in script and "aria-modal" in script and "Escape" in script
+
+    @pytest.mark.parametrize("name", ["extension_store.js", "skins-ui.js"])
+    def test_only_the_fallback_uses_the_browsers_box(self, name: str) -> None:
+        script = (self.root / "res/synth_webui/js" / name).read_text(encoding="utf-8")
+        lines = [
+            line
+            for line in script.splitlines()
+            if "window.confirm(" in line or "window.alert(" in line
+        ]
+        assert len(lines) <= 2  # the no-SynthDialog fallback, nothing else
+        assert "SynthDialog" in script
+        assert " alert(" not in script and "(alert(" not in script
+
+    def test_the_permissions_question_lists_what_is_asked_for(self) -> None:
+        script = (self.root / "res/synth_webui/js/extension_store.js").read_text(
+            encoding="utf-8"
+        )
+        assert "details: result.requested" in script
+        assert "Grant these capabilities now?" in script

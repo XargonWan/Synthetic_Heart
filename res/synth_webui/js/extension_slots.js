@@ -111,6 +111,17 @@
         if (button) button.setAttribute('aria-expanded', 'false');
     }
 
+    // The collapsed (hamburger) menu closes when a tab is chosen (main.js); choosing an
+    // entry of More is choosing a page too, so it closes it as well.
+    function closeNav() {
+        const header = document.querySelector('header.top-bar');
+        const hamburger = document.querySelector('.hamburger');
+        const nav = document.querySelector('nav.main-nav');
+        if (header) header.classList.remove('nav-open');
+        if (hamburger) hamburger.setAttribute('aria-expanded', 'false');
+        if (nav) nav.classList.remove('open');
+    }
+
     function ensureButton() {
         if (button) return;
         const nav = document.querySelector('nav.main-nav');
@@ -167,7 +178,7 @@
                 'color:var(--text-soft);font-size:1rem;cursor:pointer;text-align:left';
             item.appendChild(el('span', { textContent: entry.icon || '▫' }));
             item.appendChild(el('span', { textContent: entry.title }));
-            item.addEventListener('click', () => { closeMenu(); openWindow(entry); });
+            item.addEventListener('click', () => { closeMenu(); closeNav(); openWindow(entry); });
             menu.appendChild(item);
         });
     }

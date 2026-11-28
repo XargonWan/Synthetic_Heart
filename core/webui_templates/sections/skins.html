@@ -1,5 +1,12 @@
 <section class="tab-panel" id="tab-skins" data-tab="skins" role="tabpanel">
-    <div class="settings-grid">
+    <div class="settings-grid" style="flex-direction: column;">
+        <nav class="skins-subnav" role="tablist" aria-label="Skins views">
+            <button class="skins-subnav-btn active" type="button" data-skins-subtab="installed" aria-selected="true">Installed</button>
+            <button class="skins-subnav-btn" type="button" data-skins-subtab="catalog" aria-selected="false">Catalog</button>
+            <button class="skins-subnav-btn" type="button" data-skins-subtab="repositories" aria-selected="false">Repositories</button>
+        </nav>
+
+        <div class="skins-subpanel active" id="skins-panel-installed" data-skins-subtab="installed">
         <article class="card">
             <h2>Skins</h2>
             <p>Manage installed skins. Each skin should include at least one <code>.vrm</code> file. If a skin lacks animations, Rei will be used as fallback.</p>
@@ -46,12 +53,55 @@
             <div id="skins-grid" class="skins-grid">
                 <div class="meta">Loading skins...</div>
             </div>
-            <h3 style="margin-top:1.5rem">Get more skins</h3>
-            <p class="meta">Skins offered by your repositories (add repositories in Plugins &gt; Repositories). Rei and Zero come with SyntH and stay.</p>
-            <div id="skins-catalog"><div class="meta">Loading the catalog...</div></div>
             <div style="margin-top:1rem">
                 <button class="btn-ghost" id="clear-uploaded">Clear uploaded VRM (restore Rei)</button>
             </div>
         </article>
+        </div>
+
+        <div class="skins-subpanel" id="skins-panel-catalog" data-skins-subtab="catalog">
+            <article class="card">
+                <h2>Catalog</h2>
+                <div class="meta">Skins offered by your repositories: install, update, roll back, uninstall. Rei and Zero come with SyntH and stay.</div>
+                <div id="skins-extension-catalog">
+                    <div class="meta">Loading the catalog...</div>
+                </div>
+            </article>
+        </div>
+
+        <div class="skins-subpanel" id="skins-panel-repositories" data-skins-subtab="repositories">
+            <article class="card">
+                <h2>Repositories</h2>
+                <div class="meta">The same repositories as in Plugins: a skin is a plugin like any other, whatever it ships.</div>
+                <div id="skins-extension-repositories">
+                    <div class="meta">Loading the repositories...</div>
+                </div>
+            </article>
+        </div>
     </div>
 </section>
+
+<style>
+    .skins-subnav {
+        display: flex;
+        gap: 0.75rem;
+        margin-bottom: 1rem;
+        padding: 0.5rem;
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        border-radius: 10px;
+        background: rgba(12, 12, 20, 0.35);
+    }
+    .skins-subnav-btn {
+        border: 0;
+        border-radius: 8px;
+        padding: 0.55rem 0.95rem;
+        background: transparent;
+        color: var(--text-soft);
+        cursor: pointer;
+        transition: background 0.2s ease, color 0.2s ease;
+    }
+    .skins-subnav-btn:hover { background: rgba(255, 255, 255, 0.05); color: var(--text); }
+    .skins-subnav-btn.active { background: var(--accent); color: var(--accent-contrast, #fff); }
+    .skins-subpanel { display: none; }
+    .skins-subpanel.active { display: block; }
+</style>
