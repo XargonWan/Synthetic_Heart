@@ -19,6 +19,17 @@ from typing import Any
 
 from core.extensions.manifest import EXTENSION_ID_RE
 
+#: The components the settings migration knew when it kept a single "done" flag.
+_MIGRATED_BEFORE_THE_LIST = (
+    "official/telegram_bot",
+    "official/telegram",
+    "official/fluxer",
+    "official/matrix",
+    "official/radio_host",
+    "official/vox_kitten",
+    "official/auris_vosk",
+    "official/openai_api",
+)
 #: What the image's own repository was called (see ``builtin_repositories``).
 _BAKED_IN_NAME = "bundled"
 _NAME = re.compile(r"^[a-z0-9][a-z0-9_.-]{0,39}$")
@@ -200,9 +211,10 @@ class State:
     #: on purpose (they are not put back).
     defaults_done: bool = False
     declined: list[str] = field(default_factory=list)
-    #: Whether the settings of the old in-tree plugins were carried over
-    #: (``core.extensions.legacy``); it runs once.
-    legacy_done: bool = False
+    #: The extensions whose old in-tree settings were carried over
+    #: (``core.extensions.legacy``): each runs once, so a component added later still
+    #: gets its turn on an installation that migrated the others long ago.
+    legacy_migrated: list[str] = field(default_factory=list)
 
 
 class StateStore:
@@ -226,7 +238,12 @@ class StateStore:
                     installed.repo = OFFICIAL_NAME
                 state.extensions[ext_id] = installed
         state.defaults_done = bool(raw.get("defaults_done"))
-        state.legacy_done = bool(raw.get("legacy_done"))
+        migrated = raw.get("legacy_migrated")
+        if isinstance(migrated, list):
+            state.legacy_migrated = [m for m in migrated if isinstance(m, str)]
+        elif raw.get("legacy_done"):
+            # Written before the list existed: these were the components then.
+            state.legacy_migrated = list(_MIGRATED_BEFORE_THE_LIST)
         state.declined = [d for d in raw.get("declined", []) if isinstance(d, str)]
         return state
 
@@ -238,7 +255,7 @@ class StateStore:
                     k: asdict(v) for k, v in sorted(state.extensions.items())
                 },
                 "defaults_done": state.defaults_done,
-                "legacy_done": state.legacy_done,
+                "legacy_migrated": sorted(set(state.legacy_migrated)),
                 "declined": sorted(set(state.declined)),
             },
         )

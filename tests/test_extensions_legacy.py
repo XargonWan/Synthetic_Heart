@@ -143,6 +143,27 @@ class TestDecisions:
         assert not off.migrate and not off.install
         assert not decide(component("official/matrix"), {}).migrate
 
+    def test_a_configured_discord_bot_is_fetched_with_its_settings(self) -> None:
+        rows = {
+            "DISCORD_BOT_TOKEN": "tok",
+            "DISCORD_BOT_USE_SYNTH_AVATAR": "false",
+            "LIVE_TRAINER_ONLY_VOICE": "false",
+            "OTHER": "x",
+        }
+        d = decide(component("official/discord"), rows)
+        assert d.migrate and d.install and not d.switch_off
+        assert d.settings == {
+            "DISCORD_BOT_TOKEN": "tok",
+            "DISCORD_BOT_USE_SYNTH_AVATAR": "false",
+            "DISCORD_VOICE_TRAINER_ONLY": "false",
+        }
+        off = decide(
+            component("official/discord"),
+            {**rows, "INTERFACE_ENABLED__discord_bot": "false"},
+        )
+        assert not off.migrate and not off.install
+        assert not decide(component("official/discord"), {}).migrate
+
     def test_a_radio_host_without_a_station_never_worked(self) -> None:
         rows = {**self.RADIO, "RADIO_HOST_ENABLED": "true"}
         del rows["AZURACAST_STATION_ID"]
@@ -442,8 +463,34 @@ class TestStartup:
         first = await runtime._migrate_legacy(tmp_path)  # noqa: SLF001
         second = await runtime._migrate_legacy(tmp_path)  # noqa: SLF001
         assert "official/fluxer: in use" in first
-        assert second == "" and len(reads) == 1
+        assert second == "" and len(reads) == 1  # every component is handled once
         assert port.settings == {("official/fluxer", "FLUXER_TOKEN"): "t"}
+
+    async def test_a_component_added_later_still_gets_its_turn(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An installation that migrated the others long ago (the old single flag) must
+        still carry its Discord settings over."""
+        from core.extensions import legacy_port, runtime
+        from core.extensions.repo.installer import Installer
+
+        installer = Installer(tmp_path)
+        installer.state.path.parent.mkdir(parents=True, exist_ok=True)
+        installer.state.path.write_text(json.dumps({"legacy_done": True}))
+        assert "official/discord" not in installer.state.load().legacy_migrated
+        assert "official/fluxer" in installer.state.load().legacy_migrated
+
+        async def rows(keys: Any) -> dict[str, str]:
+            return {"DISCORD_BOT_TOKEN": "tok", "FLUXER_TOKEN": "old"}
+
+        port = FakePort(set())
+        monkeypatch.setattr(legacy_port, "read_rows", rows)
+        monkeypatch.setattr(legacy_port, "CoreLegacyPort", lambda installer: port)
+        note = await runtime._migrate_legacy(tmp_path)  # noqa: SLF001
+        assert "official/discord: installed" in note and "fluxer" not in note
+        assert ("install", "official/discord") in port.calls
+        assert "official/discord" in Installer(tmp_path).state.load().legacy_migrated
+        assert await runtime._migrate_legacy(tmp_path) == ""  # noqa: SLF001
 
     async def test_an_unreadable_database_is_retried_next_start(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -457,4 +504,4 @@ class TestStartup:
         monkeypatch.setattr(legacy_port, "read_rows", broken)
         note = await runtime._migrate_legacy(tmp_path)  # noqa: SLF001
         assert "not migrated" in note and "ConnectionError" in note
-        assert Installer(tmp_path).state.load().legacy_done is False
+        assert Installer(tmp_path).state.load().legacy_migrated == []

@@ -1,6 +1,6 @@
 """Carry an installation's old plugin settings over to the extensions that replaced them.
 
-Telegram (bot and userbot), Fluxer and the OpenAI/Ollama API server used to be Core code
+Telegram (bot and userbot), Discord, Fluxer and the OpenAI/Ollama API server used to be Core code
 whose settings sit in the ``config`` table under their old names (``BOTFATHER_TOKEN``,
 ``TELEGRAM_*``, ``FLUXER_*``, ``OLLAMA_*``, the ``INTERFACE_ENABLED__*`` flags and the
 Telegram login session). The extensions read their own keys, so without this step an
@@ -19,7 +19,7 @@ The rules, from the operator's brief:
   for is the operator's newer choice.
 
 The decisions are pure (:func:`decide`); :func:`migrate` applies them through a small
-port, so both are tested without a database. It runs once (``State.legacy_done``).
+port, so both are tested without a database. Each component runs once (``State.legacy_migrated``).
 """
 
 from __future__ import annotations
@@ -90,6 +90,17 @@ COMPONENTS: tuple[Component, ...] = (
         },
         required=("FLUXER_TOKEN",),
         enabled_keys=("INTERFACE_ENABLED__fluxer_bot",),
+    ),
+    Component(
+        "official/discord",
+        {
+            "DISCORD_BOT_TOKEN": "DISCORD_BOT_TOKEN",
+            "DISCORD_BOT_USE_SYNTH_AVATAR": "DISCORD_BOT_USE_SYNTH_AVATAR",
+            "LIVE_TRAINER_ONLY_VOICE": "DISCORD_VOICE_TRAINER_ONLY",
+        },
+        required=("DISCORD_BOT_TOKEN",),
+        enabled_keys=("INTERFACE_ENABLED__discord_bot",),
+        default_package=False,
     ),
     Component(
         "official/matrix",

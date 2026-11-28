@@ -290,13 +290,24 @@ async def _migrate_legacy(root: Path) -> str:
         from core.extensions.legacy_port import CoreLegacyPort, read_rows
         from core.extensions.repo.installer import Installer
 
+        from core.extensions.legacy import COMPONENTS
+
         installer = Installer(root, skins_dir=default_skins_dir())
-        state = installer.state.load()
-        if state.legacy_done:
+        pending = [
+            c
+            for c in COMPONENTS
+            if c.extension_id not in installer.state.load().legacy_migrated
+        ]
+        if not pending:
             return ""
-        report = await migrate(await read_rows(old_keys()), CoreLegacyPort(installer))
+        report = await migrate(
+            await read_rows(old_keys()), CoreLegacyPort(installer), pending
+        )
         state = installer.state.load()
-        state.legacy_done = True
+        state.legacy_migrated = [
+            *state.legacy_migrated,
+            *(c.extension_id for c in pending),
+        ]
         installer.state.save(state)
         return "[extensions] settings of the old plugins: " + "; ".join(report.lines)
     except Exception as exc:  # noqa: BLE001 - never stop start-up (and retry next time)
