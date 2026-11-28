@@ -469,3 +469,25 @@ class TestQuestionsAreAnInAppModal:
         )
         assert "details: result.requested" in script
         assert "Grant these capabilities now?" in script
+
+
+def test_installed_plugins_use_the_catalogs_grid_and_cannot_be_resized_by_hand() -> (
+    None
+):
+    """The Installed list is the same grid as the Catalog (220 to 340 px, the details take the
+    rest); it used to be a draggable split that remembered a width and could start tiny."""
+    root = Path(__file__).resolve().parent.parent
+    shell = (root / "core/webui_templates/synth_webui_shell.html").read_text(
+        encoding="utf-8"
+    )
+    section = (root / "core/webui_templates/sections/plugins.html").read_text(
+        encoding="utf-8"
+    )
+    main = (root / "res/synth_webui/js/main.js").read_text(encoding="utf-8")
+    store = (root / "res/synth_webui/js/extension_store.js").read_text(encoding="utf-8")
+    assert "grid-template-columns: minmax(220px, 340px) minmax(0, 1fr);" in shell
+    assert "minmax(220px,340px) 1fr" in store  # the Catalog's own
+    assert "plugins-col-resizer" not in shell + section + main
+    assert "setupPluginsColResizer" not in main and "--plugins-left-w" not in shell
+    # A width saved by the old splitter is forgotten, so nobody keeps a tiny list.
+    assert "removeItem('synth.plugins.leftPaneWidth')" in main

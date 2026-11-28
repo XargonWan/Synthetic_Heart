@@ -1023,65 +1023,23 @@
             flex-direction: column;
             gap: 0.75rem;
         }
-        /* Two-column plugins layout: left banner list, right detail pane.
-           Both columns share the same height and extend to the bottom of the
-           viewport; each column scrolls internally so the page itself does not
-           scroll. */
+        /* Two-column plugins layout: left banner list, right detail pane. The same grid as the
+           Catalog (a list of 220 to 340 px, the details taking the rest); not resizable by hand. */
         .plugins-two-col {
-            display: flex;
-            gap: 1rem;
-            align-items: stretch;
-            height: calc(100vh - var(--plugins-two-col-offset, 220px));
-            min-height: 320px;
+            display: grid;
+            grid-template-columns: minmax(220px, 340px) minmax(0, 1fr);
+            gap: 18px;
+            align-items: start;
+            margin-top: 10px;
         }
         .plugins-col-left {
-            flex: 0 0 var(--plugins-left-w, 320px);
-            width: var(--plugins-left-w, 320px);
-            min-width: 200px;
             display: flex;
             flex-direction: column;
-            gap: 0.75rem;
-            height: 100%;
-            overflow-y: auto;
-        }
-        /* Draggable column resizer between the plugin list and the detail pane. */
-        .plugins-col-resizer {
-            flex: 0 0 auto;
-            align-self: stretch;
-            width: 6px;
-            cursor: col-resize;
-            background: var(--border, rgba(255, 255, 255, 0.12));
-            border-radius: 3px;
-            transition: background 0.15s ease;
-            position: relative;
-            user-select: none;
-        }
-        .plugins-col-resizer:hover,
-        .plugins-col-resizer.dragging {
-            background: var(--accent, #5aa9ff);
-        }
-        /* Widen the invisible hit area without changing the visual width. */
-        .plugins-col-resizer::before {
-            content: "";
-            position: absolute;
-            top: 0;
-            bottom: 0;
-            left: -5px;
-            right: -5px;
-        }
-        body.plugins-col-resizing {
-            cursor: col-resize;
-            user-select: none;
+            gap: 6px;
+            min-width: 0;
         }
         .plugins-col-right {
-            flex: 1 1 auto;
             min-width: 0;
-            border: 1px solid var(--border);
-            border-radius: 16px;
-            padding: 1rem 1.25rem;
-            background: rgba(255, 255, 255, 0.03);
-            height: 100%;
-            overflow-y: auto;
         }
         .plugin-category-header {
             display: flex;
@@ -1392,10 +1350,7 @@
             line-height: 1;
         }
         @media (max-width: 860px) {
-            .plugins-two-col { flex-direction: column; height: auto; min-height: 0; }
-            .plugins-col-left { flex: 1 1 auto; width: auto; max-width: none; max-height: none; height: auto; overflow-y: visible; }
-            .plugins-col-right { height: auto; overflow-y: visible; }
-            .plugins-col-resizer { display: none; }
+            .plugins-two-col { grid-template-columns: minmax(0, 1fr); }
             /* Single-column navigation: list by default, detail once a plugin
                is opened. The list and the detail pane never show together. */
             .plugins-two-col .plugins-col-right { display: none; }

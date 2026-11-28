@@ -6840,87 +6840,10 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                 refreshConfig();
             }
 
-            // ── Draggable column resizer between the plugin list and detail pane ──
-            // Mirrors the Agent/Tasks page resizer (agent.js). Idempotent: safe to
-            // call on every plugins-tab (re-)init; bindings are guarded per-element.
-            function setupPluginsColResizer() {
-                const layout = document.getElementById('plugins-two-col');
-                const leftPane = document.getElementById('plugins-banner-list');
-                const resizer = document.getElementById('plugins-col-resizer');
-                if (!layout || !leftPane || !resizer) return;
-
-                const LS_KEY = 'synth.plugins.leftPaneWidth';
-                const MIN_LEFT = 200;   // px
-                const MIN_RIGHT = 320;  // px reserved for the detail pane
-                const RESIZER_W = 6;    // px, keep in sync with CSS
-
-                const isNarrow = () => window.innerWidth <= 860;
-
-                const applyLayout = () => {
-                    if (isNarrow()) {
-                        layout.style.removeProperty('--plugins-left-w');
-                        return;
-                    }
-                    const stored = parseFloat(localStorage.getItem(LS_KEY) || '');
-                    if (stored && !Number.isNaN(stored)) {
-                        const maxLeft = Math.max(MIN_LEFT, layout.clientWidth - MIN_RIGHT - RESIZER_W);
-                        const w = Math.min(Math.max(stored, MIN_LEFT), maxLeft);
-                        layout.style.setProperty('--plugins-left-w', w + 'px');
-                    } else {
-                        layout.style.removeProperty('--plugins-left-w');
-                    }
-                };
-                applyLayout();
-
-                if (!resizer.__pluginsBound) {
-                    let dragging = false;
-                    const onMove = (ev) => {
-                        if (!dragging) return;
-                        const rect = layout.getBoundingClientRect();
-                        const clientX = (ev.touches && ev.touches[0]) ? ev.touches[0].clientX : ev.clientX;
-                        let w = clientX - rect.left;
-                        const maxLeft = Math.max(MIN_LEFT, layout.clientWidth - MIN_RIGHT - RESIZER_W);
-                        w = Math.min(Math.max(w, MIN_LEFT), maxLeft);
-                        layout.style.setProperty('--plugins-left-w', w + 'px');
-                        if (ev.cancelable) ev.preventDefault();
-                    };
-                    const onUp = () => {
-                        if (!dragging) return;
-                        dragging = false;
-                        resizer.classList.remove('dragging');
-                        document.body.classList.remove('plugins-col-resizing');
-                        const cur = layout.style.getPropertyValue('--plugins-left-w');
-                        const px = parseFloat(cur);
-                        if (px && !Number.isNaN(px)) localStorage.setItem(LS_KEY, String(Math.round(px)));
-                        document.removeEventListener('mousemove', onMove);
-                        document.removeEventListener('mouseup', onUp);
-                        document.removeEventListener('touchmove', onMove);
-                        document.removeEventListener('touchend', onUp);
-                    };
-                    const onDown = (ev) => {
-                        if (isNarrow()) return;
-                        dragging = true;
-                        resizer.classList.add('dragging');
-                        document.body.classList.add('plugins-col-resizing');
-                        document.addEventListener('mousemove', onMove);
-                        document.addEventListener('mouseup', onUp);
-                        document.addEventListener('touchmove', onMove, { passive: false });
-                        document.addEventListener('touchend', onUp);
-                        if (ev.cancelable) ev.preventDefault();
-                    };
-                    resizer.addEventListener('mousedown', onDown);
-                    resizer.addEventListener('touchstart', onDown, { passive: false });
-                    if (!resizer.__pluginsResizeListener) {
-                        window.addEventListener('resize', applyLayout);
-                        resizer.__pluginsResizeListener = true;
-                    }
-                    resizer.__pluginsBound = true;
-                }
-            }
-
             function initPluginsTab() {
                 loadComponentsSummary();
-                setupPluginsColResizer();
+                // The list used to be resizable by hand and remembered its width: forget it.
+                try { localStorage.removeItem('synth.plugins.leftPaneWidth'); } catch (e) { /* no storage */ }
                 setupPluginsSubnav();
             }
 

@@ -1,3 +1,11 @@
+### fix(webui): the Installed plugin list is the same grid as the Catalog, no longer resizable by hand
+
+The list of Plugins > Installed was a draggable split that remembered its width in the browser and could start very small. It is now the Catalog's layout: a list of 220 to 340 px and the details taking the rest, no divider, no frame around the details. The width the old splitter had saved (`synth.plugins.leftPaneWidth`) is forgotten the first time the tab opens. The page scrolls as a whole, like the Catalog; on a narrow screen it is still the list first, the details once a plugin is opened.
+
+**Not verified here.** Not looked at in a browser.
+
+**Location.** `core/webui_templates/synth_webui_shell.html`, `core/webui_templates/sections/plugins.html`, `res/synth_webui/js/main.js`, `tests/test_extensions_ui.py`.
+
 ### fix(webui): the Queue shows what waits, scrolls when a card is open; Catalog and Repositories refresh; skins show their picture
 
 **Queue.** The turn being processed is the live card under *Running now*; it is no longer listed a second time in the queue below (the list holds what waits, "Queue is empty" when nothing does). The Queue panel scrolls as a whole, with the filters kept at the top: before, only the list below had a scrollbar, so an expanded card taller than the window could not be reached with the mouse wheel. The live cards are drawn again on every poll (3 s); the scroll position inside an open card and of the panel is now kept, which also stopped a block snapping back to the top while read.

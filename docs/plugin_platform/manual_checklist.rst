@@ -88,6 +88,10 @@ Plugins, store and the WebUI
    detail pane of every extension-backed plugin. Repositories lists, adds and removes
    repositories (a development folder is one too); the official one shows as *built in* and
    cannot be removed; an untrusted one asks for confirmation in an in-app modal.
+#. Plugins > Installed (**new**): the list on the left is the same width and look as the
+   Catalog's (about 220 to 340 px, no draggable divider, no frame around the details), also
+   if you had dragged it narrow before (the saved width is forgotten); the page scrolls as a
+   whole; on a phone-width window it shows the list, then the details with the back button.
 #. **Refresh** (**new**): Catalog and Repositories, on Plugins and on Skins, have a 🔄
    button that reads the repositories again (push a new release, press it, the new version
    shows). They also refresh by themselves after an install, update, remove, roll back, or a
