@@ -24,6 +24,9 @@ from core.extensions.archive import archive_sha256, read_archive_manifest
 from core.extensions.manifest import MANIFEST_FILENAME, Manifest, load_manifest
 from core.extensions.repo.index import (
     INDEX_NAME,
+    MAX_SCREENSHOT_BYTES,
+    MAX_SCREENSHOTS,
+    SCREENSHOT_SUFFIXES,
     SCHEMA,
     SIGNATURE_NAME,
     parse_index,
@@ -117,6 +120,41 @@ def _platform_of(archive: Path) -> str:
     return host_platform() if native else "any"
 
 
+def _publish_screenshots(archive: Path, repo_dir: Path) -> list[dict[str, object]]:
+    """Put the pictures of the archive's ``screenshots/`` folder next to it as files of the
+    repository (``<archive name>--<file name>``) and describe them for the index, in the
+    order of their file names. A picture that is too big, not a picture, or beyond the
+    limit is left out."""
+    import hashlib
+
+    published: list[dict[str, object]] = []
+    with zipfile.ZipFile(archive) as bundle:
+        names = sorted(
+            info.filename
+            for info in bundle.infolist()
+            if not info.is_dir()
+            and info.filename.startswith("screenshots/")
+            and info.filename.count("/") == 1
+            and info.filename.lower().endswith(SCREENSHOT_SUFFIXES)
+            and 0 < info.file_size <= MAX_SCREENSHOT_BYTES
+        )
+        for name in names[:MAX_SCREENSHOTS]:
+            data = bundle.read(name)
+            plain = "".join(
+                c if c.isalnum() or c in "._-" else "_" for c in name.split("/", 1)[1]
+            )
+            target = archive.with_name(f"{archive.stem}--{plain}")
+            target.write_bytes(data)
+            published.append(
+                {
+                    "file": target.relative_to(repo_dir).as_posix(),
+                    "sha256": hashlib.sha256(data).hexdigest(),
+                    "size": len(data),
+                }
+            )
+    return published
+
+
 def build_index(
     repo_dir: Path,
     *,
@@ -165,6 +203,11 @@ def build_index(
                 "capabilities": list(manifest.permissions.capabilities),
                 "authors": list(manifest.authors),
                 **({"kind": "skins"} if manifest.kind == "skins" else {}),
+                **(
+                    {"screenshots": shots}
+                    if (shots := _publish_screenshots(archive, repo_dir))
+                    else {}
+                ),
             }
         )
     unknown = sorted(set(default_install) - {p["id"] for p in packages})
@@ -221,6 +264,8 @@ def build_release(
     out_dir.mkdir(parents=True, exist_ok=True)
     for stale in out_dir.glob(f"*{RELEASE_SUFFIX}"):
         stale.unlink()
+    for stale in out_dir.glob("*--*"):  # the pictures of an earlier build
+        stale.unlink()
     assets: list[Path] = []
     with tempfile.TemporaryDirectory(prefix="synth-release-") as scratch:
         for source in sources:
@@ -239,6 +284,7 @@ def build_release(
         default_install=default_install,
         suffixes=(RELEASE_SUFFIX,),
     )
+    assets.extend(sorted(out_dir.glob("*--*")))  # the pictures of the extensions
     assets.append(index)
     signature = out_dir / SIGNATURE_NAME
     if signature.is_file():

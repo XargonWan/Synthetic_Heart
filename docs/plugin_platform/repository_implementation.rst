@@ -100,6 +100,32 @@ SHA-256. ``index`` writes and signs the index; ``keygen`` makes a publisher key.
     uv run python -m core.extensions.cli repo add official ./repo --key <public key> --trusted
     uv run python -m core.extensions.cli install official/telegram_bot --grant
 
+Screenshots, progress and updates in the Store
+----------------------------------------------
+
+* **Screenshots.** An extension may carry a ``screenshots/`` folder (``.png``, ``.jpg``,
+  ``.webp`` or ``.gif``; at most 8, each at most 2 MB). The catalog shows them in file-name
+  order. The builder (``build_index`` / ``build_release``) takes them out of the package and
+  publishes each as a file of the repository beside it (``<archive name>--<file name>``, a
+  release asset in the GitHub layout); the signed index lists them with their SHA-256 and size
+  (``screenshots``), so a picture can be shown **before** the extension is installed and is
+  still checked against the signature. ``GET /api/extensions/store/screenshot/<id>/<n>`` serves
+  picture ``n``: from the installed package when there is one, otherwise from the repository
+  (cached by SHA-256; one that does not match is never shown).
+* **Progress.** ``Installer.install`` opens an operation (``core/extensions/repo/progress.py``);
+  the transports report the bytes they write through a context variable, so no signature
+  changed. ``GET /api/extensions/store/progress`` answers ``{id: {percent, phase}}`` and the
+  Install and Update buttons give way to a bar in the highlight colour with the percentage.
+  Downloads are 90 % of it (a package already in the cache counts as downloaded), placing the
+  packages is the last 10 %.
+* **One source for "update available" and "update".** An update comes from the repository the
+  extension was installed from (``Installer._update_source``), and so does the marker:
+  ``updates()`` and the catalog rows ask the same question. A newer version in another
+  repository is not an update (installing it would be a change of publisher); if the
+  extension's repository is gone, any repository may update it.
+* **Questions are a modal inside Synthetic Heart** (``synth-dialog.js``), not the browser's
+  ``confirm()`` box.
+
 What was measured, and what was not
 -----------------------------------
 

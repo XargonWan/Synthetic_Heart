@@ -21,6 +21,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
 from core.extensions.repo import index as repo_index
+from core.extensions.repo import progress as repo_progress
 from core.extensions.repo.config import ConfigError, Repository
 from core.extensions.repo.installer import InstallError, Installer, UntrustedRepository
 from core.extensions.repo.transports import guess_kind
@@ -190,6 +191,35 @@ def build_router(
             if path.is_file() and not path.is_symlink():
                 return FileResponse(path, media_type=media)
         return JSONResponse({"detail": "Not found"}, status_code=404)
+
+    @router.get(f"{ROUTE}/screenshot/{{publisher}}/{{name}}/{{number}}")
+    async def screenshot(publisher: str, name: str, number: int) -> Any:
+        """Picture ``number`` of an extension: from its own package when it is installed,
+        else from its repository (checked against the signed index). Behind the WebUI's own
+        gate like the icons (an ``<img>`` cannot send a token header)."""
+        from fastapi.responses import Response
+
+        ext_id = f"{publisher}/{name}"
+        try:
+            found = await asyncio.to_thread(installer.screenshot, ext_id, number)
+        except Exception:  # noqa: BLE001 - an unreadable repository is "no picture"
+            found = None
+        if found is None:
+            return JSONResponse({"detail": "Not found"}, status_code=404)
+        data, media = found
+        return Response(
+            content=data,
+            media_type=media,
+            headers={"Cache-Control": "private, max-age=3600"},
+        )
+
+    @router.get(f"{ROUTE}/progress")
+    async def operation_progress(request: Request) -> Any:
+        """How far the installs and updates that are running have got:
+        ``{"operations": {id: {"percent": n, "phase": text}}}``."""
+        if not webui_auth.request_authorized(request):
+            return denied()
+        return {"operations": repo_progress.snapshot()}
 
     @router.get(f"{ROUTE}/updates")
     async def updates(request: Request, refresh: bool = False) -> Any:

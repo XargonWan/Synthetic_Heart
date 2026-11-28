@@ -13,6 +13,7 @@ The operator grants what the manifest declares (``grant``), deliberately.
 
 from __future__ import annotations
 
+import hashlib
 import os
 import shutil
 import stat
@@ -28,6 +29,7 @@ from packaging.version import InvalidVersion, Version
 from core.extensions.archive import archive_sha256, check_archive, read_archive_manifest
 from core.extensions.grants import FileGrantStore
 from core.extensions.manifest import EXTENSION_ID_RE, Manifest, ManifestError
+from core.extensions.repo import progress
 from core.extensions.repo.config import (
     OFFICIAL_NAME,
     InstalledRecord,
@@ -38,6 +40,9 @@ from core.extensions.repo.config import (
 )
 from core.extensions.repo.index import (
     INDEX_NAME,
+    MAX_SCREENSHOT_BYTES,
+    MAX_SCREENSHOTS,
+    SCREENSHOT_SUFFIXES,
     MAX_INDEX_BYTES,
     SIGNATURE_NAME,
     IndexError_,
@@ -106,6 +111,10 @@ class Row:
     authors: list[str] = field(default_factory=list)
     #: ``"skins"`` (files for the Skins tab) or ``"plugin"``.
     kind: str = "plugin"
+    #: How many pictures the catalog shows for it (see ``Installer.screenshot``).
+    screenshots: int = 0
+    #: The version an update left behind, which "Roll back" returns to ("" if none).
+    previous: str = ""
 
 
 def host_platform() -> str:
@@ -305,7 +314,10 @@ class Installer:
         """Fetch the archive and verify it. Returns its path and its manifest."""
         entry = candidate.entry
         target = self.cache / "downloads" / f"{entry.sha256}.synthx"
-        if not (target.is_file() and archive_sha256(target) == entry.sha256):
+        progress.expect(entry.size, f"Downloading {entry.name or entry.id}")
+        if target.is_file() and archive_sha256(target) == entry.sha256:
+            progress.advance(entry.size)  # kept from an earlier try
+        else:
             try:
                 if entry.url and not self._kept_locally(candidate):
                     fetch_url(entry.url, target, entry.size)
@@ -455,15 +467,28 @@ class Installer:
         repo: str | None = None,
         allow_untrusted: bool = False,
     ) -> InstallResult:
+        with progress.track(extension_id):
+            return self._install(extension_id, version, repo, allow_untrusted)
+
+    def _install(
+        self,
+        extension_id: str,
+        version: str | None,
+        repo: str | None,
+        allow_untrusted: bool,
+    ) -> InstallResult:
         plan = self.plan(
             extension_id, version=version, repo=repo, allow_untrusted=allow_untrusted
         )
+        progress.placing(len(plan))
         result = InstallResult()
         for candidate, path, manifest in plan:
             record = self.state.load().extensions.get(manifest.id)
             if record is not None and record.sha256 == candidate.entry.sha256:
+                progress.placed()
                 continue  # already this exact package
             self._place(candidate, path, manifest)
+            progress.placed()
             result.installed.append(f"{manifest.id} {manifest.version}")
             if manifest.experimental or candidate.entry.experimental:
                 result.warnings.append(
@@ -600,17 +625,41 @@ class Installer:
         self.state.save(state)
         self.sync_skins()
 
+    def _update_source(self, record: InstalledRecord) -> str | None:
+        """The repository an update of this extension comes from: the one it was installed
+        from, as long as that is still a repository; otherwise any (``None``)."""
+        if record.repo and any(r.name == record.repo for r in self._repositories()):
+            return record.repo
+        return None
+
+    def _newest_for(
+        self,
+        extension_id: str,
+        record: InstalledRecord,
+        candidates: list[Candidate],
+    ) -> Candidate | None:
+        """The version :meth:`update` would install, or ``None``. What offers an update and
+        what applies it look at the same repository: otherwise a newer version somewhere
+        else keeps the marker on for ever, whatever is installed."""
+        source = self._update_source(record)
+        pool = [c for c in candidates if source is None or c.repo.name == source]
+        try:
+            return self.choose(extension_id, candidates=pool)
+        except InstallError:
+            return None
+
     def updates(self, *, refresh: bool = False) -> list[tuple[str, str, str]]:
         """``(id, installed, available)`` for every extension with a newer version."""
         candidates, _ = self.available(refresh=refresh)
         out: list[tuple[str, str, str]] = []
         for ext_id, record in sorted(self.state.load().extensions.items()):
             have = _version(record.version)
-            try:
-                best = self.choose(ext_id, candidates=candidates)
-            except InstallError:
-                continue
-            if have is not None and best.entry.parsed_version > have:
+            best = self._newest_for(ext_id, record, candidates)
+            if (
+                best is not None
+                and have is not None
+                and best.entry.parsed_version > have
+            ):
                 out.append((ext_id, record.version, best.entry.version))
         return out
 
@@ -621,7 +670,9 @@ class Installer:
         if record is None:
             raise InstallError(f"{extension_id} is not installed")
         return self.install(
-            extension_id, repo=record.repo or None, allow_untrusted=allow_untrusted
+            extension_id,
+            repo=self._update_source(record),
+            allow_untrusted=allow_untrusted,
         )
 
     def rollback(self, extension_id: str) -> str:
@@ -699,10 +750,13 @@ class Installer:
                 row.description = entry.description
                 row.authors = list(entry.authors)
                 row.kind = "skins" if entry.kind == "skins" else "plugin"
+                row.screenshots = len(entry.screenshots)
         installed_manifests = self._installed_manifests()
         for ext_id, record in state.extensions.items():
             row = rows.setdefault(ext_id, Row(ext_id, ext_id))
             row.installed, row.enabled = record.version, record.enabled
+            if record.previous_version and self.previous_dir(ext_id).is_dir():
+                row.previous = record.previous_version
             manifest = installed_manifests.get(ext_id)
             if manifest is not None:
                 # What is installed is read from its own manifest, even when no
@@ -711,9 +765,81 @@ class Installer:
                 row.description = row.description or manifest.description
                 row.authors = row.authors or list(manifest.authors)
                 row.kind = manifest.kind
+            newest = self._newest_for(ext_id, record, candidates)
+            if newest is not None:
+                # What "Update" will install, from the repository it came from.
+                row.available, row.repo = newest.entry.version, newest.repo.name
             have, best = _version(record.version), _version(row.available)
             row.update = bool(have and best and best > have)
+            if not row.screenshots:
+                row.screenshots = len(self._installed_screenshots(ext_id))
         return sorted(rows.values(), key=lambda r: r.id), problems
+
+    # ---------------------------------------------------------- screenshots
+
+    def _installed_screenshots(self, extension_id: str) -> list[Path]:
+        """The pictures in the installed package's ``screenshots/`` folder, by file name."""
+        folder = self.install_dir(extension_id) / "screenshots"
+        if not folder.is_dir():
+            return []
+        return sorted(
+            (
+                p
+                for p in folder.iterdir()
+                if p.is_file()
+                and not p.is_symlink()
+                and p.suffix.lower() in SCREENSHOT_SUFFIXES
+                and 0 < p.stat().st_size <= MAX_SCREENSHOT_BYTES
+            ),
+            key=lambda p: p.name,
+        )[:MAX_SCREENSHOTS]
+
+    def screenshot(self, extension_id: str, number: int) -> tuple[bytes, str] | None:
+        """Picture ``number`` (from 0, in file-name order) of an extension and its media
+        type, or ``None``. An installed extension shows the pictures of its own package;
+        one that is not installed shows what its repository offers, checked against the
+        SHA-256 the signed index names and kept in the cache."""
+        media = {
+            ".png": "image/png",
+            ".jpg": "image/jpeg",
+            ".jpeg": "image/jpeg",
+            ".webp": "image/webp",
+            ".gif": "image/gif",
+        }
+        local = self._installed_screenshots(extension_id)
+        if local:
+            if not 0 <= number < len(local):
+                return None
+            path = local[number]
+            return path.read_bytes(), media[path.suffix.lower()]
+        candidates, _ = self.available()
+        offered = [c for c in candidates if c.entry.id == extension_id]
+        if not offered:
+            return None
+        best = max(offered, key=lambda c: c.entry.parsed_version)
+        shots = best.entry.screenshots
+        if not 0 <= number < len(shots):
+            return None
+        shot = shots[number]
+        cached = self.cache / "screenshots" / shot.sha256
+        if (
+            cached.is_file()
+            and hashlib.sha256(cached.read_bytes()).hexdigest() == shot.sha256
+        ):
+            data = cached.read_bytes()
+        else:
+            try:
+                data = self._transport_for(best.repo).read(shot.file, shot.size)
+            except TransportError:
+                return None
+            if (
+                hashlib.sha256(data).hexdigest() != shot.sha256
+                or len(data) != shot.size
+            ):
+                return None
+            cached.parent.mkdir(parents=True, exist_ok=True)
+            cached.write_bytes(data)
+        return data, media[Path(shot.file).suffix.lower()]
 
     # ------------------------------------------------------------- defaults
 

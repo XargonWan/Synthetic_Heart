@@ -50,6 +50,22 @@ class IndexError_(ValueError):  # noqa: N818 - named to avoid shadowing the buil
         super().__init__("; ".join(self.problems))
 
 
+#: Screenshots an extension may carry: at most this many, each at most this big. They are
+#: files of the repository next to the package, and the signed index names each one's SHA-256.
+MAX_SCREENSHOTS = 8
+MAX_SCREENSHOT_BYTES = 2 * 1024 * 1024
+SCREENSHOT_SUFFIXES = (".png", ".jpg", ".jpeg", ".webp", ".gif")
+
+
+@dataclass(frozen=True)
+class Screenshot:
+    """One picture of an extension, in the order of its file names."""
+
+    file: str
+    sha256: str
+    size: int
+
+
 @dataclass(frozen=True)
 class PackageEntry:
     """One installable version of one extension."""
@@ -70,6 +86,9 @@ class PackageEntry:
     authors: tuple[str, ...] = ()
     #: ``"skins"`` for an extension that only ships skins; ``""`` for everything else.
     kind: str = ""
+    #: The pictures the catalog shows, in file-name order (the ``screenshots/`` folder of the
+    #: extension).
+    screenshots: tuple[Screenshot, ...] = ()
     #: Where to download the package when it is not kept in the repository itself (a
     #: package too big for a Git host, hosted as a release asset). ``https`` only; the
     #: SHA-256 and size above still decide whether the file is the right one.
@@ -168,6 +187,39 @@ def _entry(raw: Any, position: int) -> PackageEntry:
     if kind not in ("", "plugin", "skins"):
         problems.append(f"{where}.kind must be 'plugin' or 'skins'")
         kind = ""
+    shots: list[Screenshot] = []
+    raw_shots = raw.get("screenshots", [])
+    if not isinstance(raw_shots, list) or len(raw_shots) > MAX_SCREENSHOTS:
+        problems.append(
+            f"{where}.screenshots must be a list of at most {MAX_SCREENSHOTS}"
+        )
+        raw_shots = []
+    for n, item in enumerate(raw_shots):
+        shot_file = item.get("file") if isinstance(item, dict) else None
+        shot_sha = item.get("sha256") if isinstance(item, dict) else None
+        shot_size = item.get("size") if isinstance(item, dict) else None
+        shot_parts = (
+            PurePosixPath(shot_file).parts if isinstance(shot_file, str) else ()
+        )
+        if (
+            not isinstance(shot_file, str)
+            or not shot_file
+            or shot_file.startswith("/")
+            or ".." in shot_parts
+            or "\\" in shot_file
+            or ":" in shot_file
+            or not shot_file.lower().endswith(SCREENSHOT_SUFFIXES)
+            or not isinstance(shot_sha, str)
+            or not _SHA256.match(shot_sha)
+            or not isinstance(shot_size, int)
+            or isinstance(shot_size, bool)
+            or not 0 < shot_size <= MAX_SCREENSHOT_BYTES
+        ):
+            problems.append(
+                f"{where}.screenshots[{n}] is not a picture of the repository"
+            )
+            continue
+        shots.append(Screenshot(shot_file, shot_sha, shot_size))
     for flag in ("experimental", "default_install"):
         if not isinstance(raw.get(flag, False), bool):
             problems.append(f"{where}.{flag} must be true or false")
@@ -187,6 +239,7 @@ def _entry(raw: Any, position: int) -> PackageEntry:
         default_install=bool(raw.get("default_install", False)),
         capabilities=tuple(caps),
         authors=tuple(a[:80] for a in raw_authors[:8]),
+        screenshots=tuple(shots),
         kind="skins" if kind == "skins" else "",
         url=url,
     )

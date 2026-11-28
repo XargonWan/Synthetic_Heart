@@ -22,6 +22,8 @@ from pathlib import Path, PurePosixPath
 from typing import Protocol
 from urllib.parse import urlparse
 
+from core.extensions.repo import progress
+
 CHUNK = 1024 * 1024
 
 
@@ -90,6 +92,7 @@ class LocalTransport:
                             f"{relpath!r} is larger than {limit} bytes"
                         )
                     out.write(chunk)
+                    progress.advance(len(chunk))
         except BaseException:
             dest.unlink(missing_ok=True)
             raise
@@ -260,6 +263,7 @@ def _write_stream(chunks: Iterator[bytes], dest: Path) -> None:
         with os.fdopen(fd, "wb") as out:
             for chunk in chunks:
                 out.write(chunk)
+                progress.advance(len(chunk))
     except BaseException:
         dest.unlink(missing_ok=True)
         raise
