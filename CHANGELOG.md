@@ -1,3 +1,15 @@
+### fix(webui): the Queue shows what waits, scrolls when a card is open; Catalog and Repositories refresh; skins show their picture
+
+**Queue.** The turn being processed is the live card under *Running now*; it is no longer listed a second time in the queue below (the list holds what waits, "Queue is empty" when nothing does). The Queue panel scrolls as a whole, with the filters kept at the top: before, only the list below had a scrollbar, so an expanded card taller than the window could not be reached with the mouse wheel. The live cards are drawn again on every poll (3 s); the scroll position inside an open card and of the panel is now kept, which also stopped a block snapping back to the top while read.
+
+**Catalog and Repositories** (Plugins and Skins) have a **Refresh** button that reads the repositories' indexes again (`GET /api/extensions/store?refresh=true`), and they refresh by themselves after every change: install, update, remove, roll back, a repository added or removed.
+
+**Skins in the Catalog** are shown with their picture, as in the Skins tab: the skin's own `preview.png` is the first picture of its package in the repository index (a preview over the 2 MB limit, such as Miku's 4.3 MB one, is scaled to at most 1280 px, to PNG or WebP, so it is published at about 1.5 MB instead of dropped), it is the icon in the list and a large picture, with zoom, at the top of the details; the other pictures stay in the strip. An installed skin shows the preview of its own package (`core/extensions/repo/previews.py`).
+
+**Not verified here.** None of it was looked at in a browser (Firefox does not start in this sandbox): the scrolling, the sticky filter bar and the pictures need your eyes. The behaviour is tested with a stand-in DOM and Node (the URLs the store asks for, the queue filter, the kept scroll) and the picture pipeline with real PNGs.
+
+**Location.** `core/webui_templates/sections/history.html`, `res/synth_webui/js/{history,turn_cards,extension_store}.js`, `core/extensions/repo/{previews,pack,installer}.py`, `tests/test_turn_cards_ui.py`, `tests/js/turn_cards_check.js`, `tests/test_extension_skins.py`.
+
 ### feat(extensions): the duplex audio API: Live engines in extensions, and calls held by them
 
 **Before.** A Live conversation (the model hears, answers, calls tools and can be interrupted) could only run inside the Core: `core/live_session_manager.py` builds Gemini objects, and its only host was the in-tree Discord interface, which is gone. Gemini Live had no way back, and no extension could provide a Live engine or carry a Live call.

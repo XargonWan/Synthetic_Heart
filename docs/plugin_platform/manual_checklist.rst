@@ -88,6 +88,13 @@ Plugins, store and the WebUI
    detail pane of every extension-backed plugin. Repositories lists, adds and removes
    repositories (a development folder is one too); the official one shows as *built in* and
    cannot be removed; an untrusted one asks for confirmation in an in-app modal.
+#. **Refresh** (**new**): Catalog and Repositories, on Plugins and on Skins, have a 🔄
+   button that reads the repositories again (push a new release, press it, the new version
+   shows). They also refresh by themselves after an install, update, remove, roll back, or a
+   repository added or removed, with no manual reload.
+#. Skins > Catalog (**new**): each skin shows its picture as the list icon and large in its
+   details (a click zooms it), as the Skins tab does; **Miku** (whose preview is 4.3 MB in the
+   package) shows as well as **Riko**; an installed skin keeps its picture.
 #. Install and Update show a progress bar with the percentage. A plugin with
    ``screenshots/`` shows them in the catalog before install (a click shows one large).
 #. An update is offered once and goes away after it is done (a bug offered it for ever).
@@ -101,6 +108,12 @@ Plugins, store and the WebUI
    A frame (Stage, Dashboard) sits under the top bar, **hides the chat window and the
    minimized-windows stack**, and its close button is at the bottom-left. The Dashboard's
    ``prompt``/``confirm`` work inside it.
+#. Activity > Queue (**new**): the turn being processed appears only once, as the card under
+   *Running now* (not again in the list below); expand that card and **scroll with the mouse
+   wheel** to the bottom, inside a long block and over the whole panel, while the queue
+   refreshes every 3 seconds: the position is not lost, and the search box and priority filter
+   stay at the top while you scroll. With one message waiting behind it, the list shows
+   that one only.
 #. Activity turn cards: one expandable card per turn, live in Queue and then in History; the
    card says **Done** (highlight colour) or **Error** (red) and, for a turn with no reply,
    says why (engine and reason, or that the model was not asked).
