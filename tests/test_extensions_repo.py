@@ -16,6 +16,7 @@ import pytest
 from core.extensions.manifest import load_manifest
 from core.extensions.repo import index as repo_index
 from core.extensions.repo.config import ConfigError, Repository
+from core.extensions.repo.config import builtin_repositories as _REAL_BUILTIN
 from core.extensions.repo.installer import (
     InstallError,
     Installer,
@@ -882,88 +883,44 @@ class TestLifecycle:
 
 
 class TestDefaults:
-    def _bundled(self, tmp_path: Path) -> Path:
-        bundle = Repo(tmp_path / "bundled", tmp_path)
+    def _official(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+        """An official repository (a local stand-in with its own key) that offers one
+        default and one extension that is not."""
+        bundle = Repo(tmp_path / "official", tmp_path)
         bundle.sign_with_new_key()
         bundle.add("dev/core_ui")
         bundle.add("dev/extra")
-        bundle.publish(defaults=("dev/core_ui",))
-        (bundle.dir / "public.key").write_text(bundle.public)
+        bundle.publish(name="official", defaults=("dev/core_ui",))
+        stand_in = Repository(
+            name="official",
+            location=str(bundle.dir),
+            kind="local",
+            public_key=bundle.public,
+            require_signature=True,
+            trusted=True,
+            builtin=True,
+        )
+        monkeypatch.setattr(
+            "core.extensions.repo.config.builtin_repositories", lambda: [stand_in]
+        )
         return bundle.dir
 
-    def test_defaults_install_once_offline_from_the_baked_in_repository(
-        self, tmp_path: Path
+    def test_defaults_install_once_from_the_official_repository(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        inst = Installer(
-            tmp_path / "runtime",
-            core_api_version="0.1.0",
-            bundled=self._bundled(tmp_path),
-        )
+        self._official(tmp_path, monkeypatch)
+        inst = Installer(tmp_path / "runtime", core_api_version="0.1.0")
         installed, failed = inst.ensure_defaults()
         assert installed == ["dev/core_ui"] and failed == []
         assert set(inst.state.load().extensions) == {"dev/core_ui"}
         assert inst.state.load().defaults_done is True
         assert inst.ensure_defaults() == ([], [])
 
-    def test_a_new_image_updates_what_the_old_one_installed(
-        self, tmp_path: Path
+    def test_a_default_of_the_official_repository_is_granted_what_it_declares(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A volume that outlives the container keeps old defaults: the image's own
-        repository brings them up to date, keeping their state and grants."""
-        old = Repo(tmp_path / "old", tmp_path)
-        old.sign_with_new_key()
-        old.add("dev/core_ui", "1.0.0")
-        old.publish(defaults=("dev/core_ui",))
-        (old.dir / "public.key").write_text(old.public)
-        inst = Installer(
-            tmp_path / "runtime", core_api_version="0.1.0", bundled=old.dir
-        )
-        inst.ensure_defaults()
-        inst.set_enabled("dev/core_ui", False)
-        granted = inst.grants.granted("dev/core_ui")
-        assert inst.update_bundled() == ([], [])  # nothing newer yet
-
-        new = Repo(tmp_path / "new", tmp_path)
-        new.sign_with_new_key()
-        new.add("dev/core_ui", "1.1.0")
-        new.publish(defaults=("dev/core_ui",))
-        (new.dir / "public.key").write_text(new.public)
-        fresh = Installer(
-            tmp_path / "runtime", core_api_version="0.1.0", bundled=new.dir
-        )
-        assert fresh.update_bundled() == (["dev/core_ui 1.0.0 -> 1.1.0"], [])
-        record = fresh.state.load().extensions["dev/core_ui"]
-        assert (record.version, record.enabled) == ("1.1.0", False)
-        assert fresh.grants.granted("dev/core_ui") == granted
-        assert fresh.update_bundled() == ([], [])
-
-    def test_only_what_the_image_installed_is_updated_by_the_image(
-        self, tmp_path: Path
-    ) -> None:
-        other = Repo(tmp_path / "other", tmp_path)
-        other.add("dev/mine", "1.0.0")
-        other.publish()
-        bundle = Repo(tmp_path / "bundled", tmp_path)
-        bundle.sign_with_new_key()
-        bundle.add("dev/mine", "2.0.0")
-        bundle.publish()
-        (bundle.dir / "public.key").write_text(bundle.public)
-        inst = Installer(
-            tmp_path / "runtime", core_api_version="0.1.0", bundled=bundle.dir
-        )
-        add_repo(inst, other)
-        inst.install("dev/mine", repo="test")
-        assert inst.update_bundled() == ([], [])
-        assert inst.state.load().extensions["dev/mine"].version == "1.0.0"
-
-    def test_a_default_of_the_baked_in_repository_is_granted_what_it_declares(
-        self, tmp_path: Path
-    ) -> None:
-        inst = Installer(
-            tmp_path / "runtime",
-            core_api_version="0.1.0",
-            bundled=self._bundled(tmp_path),
-        )
+        self._official(tmp_path, monkeypatch)
+        inst = Installer(tmp_path / "runtime", core_api_version="0.1.0")
         inst.ensure_defaults()
         assert inst.grants.granted("dev/core_ui") == {"log", "storage"}
         record = inst.state.load().extensions["dev/core_ui"]
@@ -982,25 +939,19 @@ class TestDefaults:
         assert installed == ["dev/pushy"] and failed == []
         assert inst.grants.granted("dev/pushy") == frozenset()
 
-    def test_only_the_defaults_are_granted_not_the_rest_of_the_bundle(
-        self, tmp_path: Path
+    def test_only_the_defaults_are_granted_not_the_rest_of_the_catalog(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        inst = Installer(
-            tmp_path / "runtime",
-            core_api_version="0.1.0",
-            bundled=self._bundled(tmp_path),
-        )
+        self._official(tmp_path, monkeypatch)
+        inst = Installer(tmp_path / "runtime", core_api_version="0.1.0")
         inst.ensure_defaults()
         assert inst.grants.granted("dev/extra") == frozenset()
 
     def test_a_default_the_operator_removed_is_never_put_back(
-        self, tmp_path: Path
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        inst = Installer(
-            tmp_path / "runtime",
-            core_api_version="0.1.0",
-            bundled=self._bundled(tmp_path),
-        )
+        self._official(tmp_path, monkeypatch)
+        inst = Installer(tmp_path / "runtime", core_api_version="0.1.0")
         inst.ensure_defaults()
         inst.remove("dev/core_ui")
         state = inst.state.load()
@@ -1012,13 +963,12 @@ class TestDefaults:
     def test_a_failing_default_is_retried_next_time_and_does_not_stop_the_others(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        bundle = Repo(tmp_path / "bundled", tmp_path)
+        bundle = Repo(tmp_path / "catalog", tmp_path)
         bundle.add("dev/good")
         bundle.add("dev/bad")
         bundle.publish(defaults=("dev/good", "dev/bad"))
-        inst = Installer(
-            tmp_path / "runtime", core_api_version="0.1.0", bundled=bundle.dir
-        )
+        inst = Installer(tmp_path / "runtime", core_api_version="0.1.0")
+        add_repo(inst, bundle)
         real = inst.install
 
         def picky(ext_id: str, **kw: Any) -> Any:
@@ -1030,22 +980,23 @@ class TestDefaults:
         installed, failed = inst.ensure_defaults()
         assert installed == ["dev/good"] and len(failed) == 1 and "dev/bad" in failed[0]
         assert inst.state.load().defaults_done is False
-        monkeypatch.undo()
+        monkeypatch.setattr(inst, "install", real)
         assert inst.ensure_defaults()[0] == ["dev/bad"]
         assert inst.state.load().defaults_done is True
 
-    def test_a_bundled_repository_that_is_tampered_with_is_ignored_safely(
-        self, tmp_path: Path
+    def test_an_unreachable_official_repository_installs_nothing_and_is_tried_again(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        bundled = self._bundled(tmp_path)
-        index_file = bundled / "synth-repo.json"
-        index_file.write_bytes(index_file.read_bytes().replace(b'"test"', b'"evil"', 1))
-        inst = Installer(
-            tmp_path / "runtime", core_api_version="0.1.0", bundled=bundled
-        )
+        """No network at the first start: nothing is installed, the step is not marked
+        done, and the next start tries again."""
+        bundle = self._official(tmp_path, monkeypatch)
+        (bundle / "synth-repo.json").rename(bundle / "gone.json")
+        inst = Installer(tmp_path / "runtime", core_api_version="0.1.0")
         installed, failed = inst.ensure_defaults()
-        assert installed == [] and failed == []
-        assert inst.state.load().extensions == {}
+        assert installed == [] and len(failed) == 1 and "official" in failed[0]
+        assert inst.state.load().defaults_done is False
+        (bundle / "gone.json").rename(bundle / "synth-repo.json")
+        assert inst.ensure_defaults()[0] == ["dev/core_ui"]
 
 
 def test_the_public_key_helper_matches_what_keygen_prints() -> None:
@@ -1055,7 +1006,13 @@ def test_the_public_key_helper_matches_what_keygen_prints() -> None:
 
 
 class TestOfficialRepository:
-    def test_it_is_added_once_pinned_signed_and_trusted(self, tmp_path: Path) -> None:
+    @pytest.fixture(autouse=True)
+    def _real_builtin(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from core.extensions.repo import config
+
+        monkeypatch.setattr(config, "builtin_repositories", _REAL_BUILTIN)
+
+    def test_it_is_always_there_pinned_signed_and_trusted(self, tmp_path: Path) -> None:
         from core.extensions.repo.config import (
             OFFICIAL_CHANNEL,
             OFFICIAL_KEY,
@@ -1064,8 +1021,7 @@ class TestOfficialRepository:
         )
 
         inst = Installer(tmp_path / "runtime", core_api_version="0.1.0")
-        assert inst.ensure_official_repository() is True
-        [repo] = inst.repos.load()
+        [repo] = inst.repos.load()  # nothing was added: it is built in
         assert (repo.name, repo.kind, repo.location, repo.branch) == (
             OFFICIAL_NAME,
             "github",
@@ -1075,38 +1031,57 @@ class TestOfficialRepository:
         assert (
             repo.public_key == OFFICIAL_KEY and repo.require_signature and repo.trusted
         )
-        assert inst.ensure_official_repository() is False
+        assert repo.builtin is True
 
-    def test_removing_it_sticks(self, tmp_path: Path) -> None:
+    def test_it_cannot_be_removed_or_edited(self, tmp_path: Path) -> None:
         inst = Installer(tmp_path / "runtime", core_api_version="0.1.0")
-        inst.ensure_official_repository()
-        inst.repos.remove("official")
-        assert inst.ensure_official_repository() is False
-        assert inst.repos.load() == []
+        with pytest.raises(ConfigError, match="cannot be removed"):
+            inst.repos.remove("official")
+        with pytest.raises(ConfigError, match="cannot be edited"):
+            inst.repos.update("official", trusted=False)
+        assert [r.name for r in inst.repos.load()] == ["official"]
 
-    def test_a_repository_the_operator_named_official_is_not_replaced(
+    def test_it_is_never_written_to_the_repositories_file(self, tmp_path: Path) -> None:
+        inst = Installer(tmp_path / "runtime", core_api_version="0.1.0")
+        mine = Repository(name="mine", location=str(tmp_path), kind="local")
+        inst.repos.add(mine)
+        stored = json.loads(inst.repos.path.read_text())
+        assert [r["name"] for r in stored["repositories"]] == ["mine"]
+        assert sorted(r.name for r in inst.repos.load()) == ["mine", "official"]
+
+    def test_a_stale_copy_from_an_older_version_is_ignored(
         self, tmp_path: Path
     ) -> None:
         inst = Installer(tmp_path / "runtime", core_api_version="0.1.0")
-        mine = Repository(name="official", location=str(tmp_path), kind="local")
-        inst.repos.add(mine)
-        assert inst.ensure_official_repository() is False
-        assert [r.location for r in inst.repos.load()] == [str(tmp_path)]
+        inst.repos.path.parent.mkdir(parents=True, exist_ok=True)
+        inst.repos.path.write_text(
+            json.dumps(
+                {
+                    "repositories": [
+                        {"name": "official", "location": "evil", "kind": "local"}
+                    ]
+                }
+            )
+        )
+        [repo] = inst.repos.load()
+        assert repo.kind == "github" and repo.builtin
+
+    def test_a_repository_cannot_take_its_name(self, tmp_path: Path) -> None:
+        inst = Installer(tmp_path / "runtime", core_api_version="0.1.0")
+        with pytest.raises(ConfigError, match="already exists"):
+            inst.repos.add(
+                Repository(name="official", location=str(tmp_path), kind="local")
+            )
+
+    def test_the_release_channel_can_be_chosen_with_the_environment(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("SYNTH_OFFICIAL_CHANNEL", "latest")
+        inst = Installer(tmp_path / "runtime", core_api_version="0.1.0")
+        assert inst.repos.load()[0].branch == "latest"
 
     def test_the_pinned_key_is_a_valid_ed25519_public_key(self) -> None:
         from core.extensions.repo.config import OFFICIAL_KEY
 
         assert len(base64.b64decode(OFFICIAL_KEY)) == 32
         assert repo_index.key_fingerprint(OFFICIAL_KEY)
-
-    def test_a_default_from_the_official_repository_is_granted_like_the_baked_in_one(
-        self, tmp_path: Path
-    ) -> None:
-        official = Repo(tmp_path / "off", tmp_path)
-        official.sign_with_new_key()
-        official.add("dev/shiny")
-        official.publish(name="official", defaults=("dev/shiny",))
-        inst = Installer(tmp_path / "runtime", core_api_version="0.1.0")
-        add_repo(inst, official, name="official")
-        assert inst.ensure_defaults()[0] == ["dev/shiny"]
-        assert inst.grants.granted("dev/shiny") == {"log", "storage"}

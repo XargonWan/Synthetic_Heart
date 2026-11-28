@@ -439,7 +439,6 @@ class TestStartup:
         port = FakePort({"official/fluxer"})
         monkeypatch.setattr(legacy_port, "read_rows", rows)
         monkeypatch.setattr(legacy_port, "CoreLegacyPort", lambda installer: port)
-        monkeypatch.setattr(runtime, "bundled_repository", lambda: None)
         first = await runtime._migrate_legacy(tmp_path)  # noqa: SLF001
         second = await runtime._migrate_legacy(tmp_path)  # noqa: SLF001
         assert "official/fluxer: in use" in first
@@ -456,7 +455,6 @@ class TestStartup:
             raise ConnectionError("db down")
 
         monkeypatch.setattr(legacy_port, "read_rows", broken)
-        monkeypatch.setattr(runtime, "bundled_repository", lambda: None)
         note = await runtime._migrate_legacy(tmp_path)  # noqa: SLF001
         assert "not migrated" in note and "ConnectionError" in note
         assert Installer(tmp_path).state.load().legacy_done is False

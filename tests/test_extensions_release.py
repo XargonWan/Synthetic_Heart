@@ -380,7 +380,11 @@ class TestGithubTokenSetting:
 
 class TestEndToEnd:
     def test_an_installation_points_at_the_release_and_installs_from_it(
-        self, github: str, released: tuple[Path, bytes, str], tmp_path: Path
+        self,
+        github: str,
+        released: tuple[Path, bytes, str],
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         _, _, public = released
         inst = Installer(
@@ -388,16 +392,20 @@ class TestEndToEnd:
             core_api_version="0.1.0",
             transport_for=lambda repo: transport(github),
         )
-        inst.repos.add(
-            Repository(
-                name="official",
-                location=REPO,
-                kind="github",
-                branch=TAG,
-                public_key=public,
-                require_signature=True,
-                trusted=True,
-            )
+        monkeypatch.setattr(
+            "core.extensions.repo.config.builtin_repositories",
+            lambda: [
+                Repository(
+                    name="official",
+                    location=REPO,
+                    kind="github",
+                    branch=TAG,
+                    public_key=public,
+                    require_signature=True,
+                    trusted=True,
+                    builtin=True,
+                )
+            ],
         )
         candidates, problems = inst.available()
         assert problems == [] and {c.entry.id for c in candidates} == {
@@ -408,7 +416,7 @@ class TestEndToEnd:
         assert "official/beta" in inst.state.load().extensions
 
     def test_a_catalog_signed_by_someone_else_is_refused(
-        self, github: str, tmp_path: Path
+        self, github: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         _, other_public = repo_index.generate_keypair()
         inst = Installer(
@@ -416,16 +424,20 @@ class TestEndToEnd:
             core_api_version="0.1.0",
             transport_for=lambda repo: transport(github),
         )
-        inst.repos.add(
-            Repository(
-                name="official",
-                location=REPO,
-                kind="github",
-                branch=TAG,
-                public_key=other_public,
-                require_signature=True,
-                trusted=True,
-            )
+        monkeypatch.setattr(
+            "core.extensions.repo.config.builtin_repositories",
+            lambda: [
+                Repository(
+                    name="official",
+                    location=REPO,
+                    kind="github",
+                    branch=TAG,
+                    public_key=other_public,
+                    require_signature=True,
+                    trusted=True,
+                    builtin=True,
+                )
+            ],
         )
         candidates, problems = inst.available()
         assert candidates == [] and "signature" in problems[0]

@@ -61,9 +61,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--root", type=Path, help="runtime root (default: <data>/extensions)"
     )
-    parser.add_argument(
-        "--bundled", type=Path, help="read-only repository baked into the image"
-    )
     sub = parser.add_subparsers(dest="command", required=True)
 
     repo = sub.add_parser("repo", help="manage repositories")
@@ -287,7 +284,6 @@ def run(argv: Sequence[str], out: Out = print) -> int:
             return 0
         inst = Installer(
             args.root or default_root(),
-            bundled=args.bundled,
             skins_dir=default_skins_dir(),
         )
         if args.command == "repo":

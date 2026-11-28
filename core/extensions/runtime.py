@@ -283,20 +283,6 @@ _web_task: asyncio.Future[bool] | None = None
 _store_task: asyncio.Future[bool] | None = None
 
 
-def bundled_repository() -> Path | None:
-    """The read-only repository baked into the image, if there is one.
-
-    ``SYNTH_EXT_BUNDLED`` names it; otherwise ``<app>/extensions_bundled`` is used when it
-    exists. First-start defaults install from it with no network."""
-    import os
-
-    override = os.environ.get("SYNTH_EXT_BUNDLED", "").strip()
-    if override:
-        return Path(override)
-    candidate = Path(__file__).resolve().parents[2] / "extensions_bundled"
-    return candidate if candidate.is_dir() else None
-
-
 async def _migrate_legacy(root: Path) -> str:
     """Carry the old plugins' settings over to their extensions, once. Never raises."""
     try:
@@ -304,9 +290,7 @@ async def _migrate_legacy(root: Path) -> str:
         from core.extensions.legacy_port import CoreLegacyPort, read_rows
         from core.extensions.repo.installer import Installer
 
-        installer = Installer(
-            root, bundled=bundled_repository(), skins_dir=default_skins_dir()
-        )
+        installer = Installer(root, skins_dir=default_skins_dir())
         state = installer.state.load()
         if state.legacy_done:
             return ""
@@ -324,12 +308,8 @@ async def _install_defaults(root: Path) -> str:
     try:
         from core.extensions.repo.installer import Installer
 
-        installer = Installer(
-            root, bundled=bundled_repository(), skins_dir=default_skins_dir()
-        )
-        await asyncio.to_thread(installer.ensure_official_repository)
+        installer = Installer(root, skins_dir=default_skins_dir())
         installed, failed = await asyncio.to_thread(installer.ensure_defaults)
-        updated, update_failed = await asyncio.to_thread(installer.update_bundled)
         await asyncio.to_thread(installer.sync_skins)
     except Exception as exc:  # noqa: BLE001 - defaults must never stop start-up
         return f"[extensions] default install skipped: {type(exc).__name__}: {exc}"
@@ -340,12 +320,6 @@ async def _install_defaults(root: Path) -> str:
         )
     elif installed:
         notes.append(f"[extensions] default install: {', '.join(installed)}")
-    if updated:
-        notes.append(f"[extensions] updated from the image: {', '.join(updated)}")
-    if update_failed:
-        notes.append(
-            f"[extensions] update from the image failed: {'; '.join(update_failed)}"
-        )
     return "\n".join(notes)
 
 
@@ -455,9 +429,7 @@ async def start_extension_runtime() -> StartReport | None:
         global _store_task
         _store_task = asyncio.ensure_future(
             mount_store(
-                Installer(
-                    root, bundled=bundled_repository(), skins_dir=default_skins_dir()
-                ),
+                Installer(root, skins_dir=default_skins_dir()),
                 lambda: _runtime,
             )
         )

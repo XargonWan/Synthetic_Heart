@@ -62,12 +62,21 @@ Behaviour
 * **On/off** is independent of installed (``enable``/``disable``); the runtime starts only
   what is on.
 * **Defaults**: ``default_install`` packages are installed once, at the first start, from
-  the baked-in repository (``SYNTH_EXT_BUNDLED`` or ``<app>/extensions_bundled``) so it
-  works offline. One that fails is retried at the next start without stopping the others;
-  one the operator uninstalled is never put back. A default that comes from the baked-in
-  repository is also **switched on and granted what its manifest declares** (the image's
-  own repository is the one source trusted to do that); a default that another repository
-  merely flags is installed but not granted.
+  the **official repository**, which is built in (below). The first start needs the network:
+  while the repository cannot be read nothing is marked done, and the next start tries
+  again. One that fails is retried at the next start without stopping the others; one the
+  operator uninstalled is never put back. A default that comes from the official
+  repository is also **switched on and granted what its manifest declares** (it is the one
+  source trusted to do that); a default that another repository merely flags is installed
+  but not granted.
+* **The official repository is built in** (``builtin_repositories()`` in
+  ``core/extensions/repo/config.py``): pinned address and publisher key, a rolling GitHub
+  release (``latest-develop``; ``SYNTH_OFFICIAL_CHANNEL`` picks another, ``latest`` for the
+  ``main`` channel). It is never written to ``repositories.json``, cannot be removed or
+  edited (the Repositories tab shows it as *built in*), and no other repository can take
+  its name. The image carries no extension at all. Until now the image baked the defaults
+  in (``scripts/build_bundled_extensions.py``, ``extensions_bundled/``, commit that removes
+  them: find it with ``git log --diff-filter=D -- scripts/build_bundled_extensions.py``).
 * **From the Store** an install switches the extension on and then shows what it asks for
   and offers to grant it; nothing is granted without that confirmation.
 * **Live**: the Catalog and Repositories tabs (Plugins) and the CLI use the same installer. From the
@@ -101,21 +110,9 @@ What was measured, and what was not
   (136 MB) that py-tgcalls brings. That package is also platform-specific
   (``linux-x86_64-py312``), so an official repository needs one build per platform, or
   the call support split into an optional extension. Not decided.
-* **The image side** is written: ``scripts/build_bundled_extensions.py`` packs the default
-  extensions into ``extensions_bundled/`` (packages, signed index, ``public.key``; the
-  signing key is made for the build and discarded) and the Dockerfile runs it after copying
-  the Stage client in. The script and the path from a bundle to a served page are tested
-  (``tests/test_stage_bundle.py``: pack, sign, first-start install, grant, run, serve). The
-  **Dockerfile was built** (2026-11-25, ``docker build --network=host``; the default build
-  network could not reach the npm registry on that machine): the bundling step packed the
-  defaults with the real Stage client, and inside the image a first-start install from
-  ``/app/extensions_bundled`` installed all of them and their libraries import under
-  ``python -S -I``. The defaults it packs (``DEFAULTS`` in the script: Stage, OpenAI API,
-  Fluxer, Telegram bot, Zen) are my choice, not decided yet. The platform is **on by
-  default** and these defaults are granted on the first start, so a fresh image runs them
-  (an interface that needs a token or a setting sits idle until it is given one); the
-  step that carries an existing installation's old settings over is the post-update step
-  in :doc:`migration_plan`.
+* **The image side**: the Dockerfile builds the Core's environment (multi-stage: no compiler, no
+  dev dependencies, no cache) and nothing else. It holds no extension, no Node.js and no
+  SearXNG; the extensions come from the official repository at the first start.
 * **The official repository is a GitHub-release catalog** (2026-11-26; see
   :doc:`repository_architecture`): kind ``github``, a rolling release per branch
   (``latest-develop``, ``latest``), one zip per extension, a signed catalog, built and published

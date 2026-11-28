@@ -191,8 +191,9 @@ Milestones
        Docker** (2026-11-25): the Stage stage builds (``pnpm install`` and ``vite build``;
        a plain ``docker build`` could not reach the npm registry from its network,
        ``--network=host`` could), the whole image builds, packs the five defaults, and a
-       first-start install from ``/app/extensions_bundled`` inside a container installs
-       them with their bundled libraries importing under the sandbox interpreter.
+       first-start install inside a container installed
+       them (at the time from ``/app/extensions_bundled``; the image no longer carries any
+       extension, see :doc:`repository_implementation`) with their bundled libraries importing under the sandbox interpreter.
        **WebUI slots (2026-11-25)**: three fixed points
        (``activity``, ``logs``, ``more``; your decision) take windows from extensions
        (``[[provides.ui]]``); Stage is the first, in ``more``. Static pages are sandboxed

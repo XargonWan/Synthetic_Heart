@@ -98,14 +98,16 @@
                 el('td', { textContent: r.fingerprint || 'none' }),
                 el('td', { textContent: r.trusted ? 'yes' : 'no' }),
                 el('td', { textContent: String(offered[r.name] || 0) }),
-                el('td', {}, [el('button', {
-                    className: 'pill', textContent: 'Remove',
-                    onclick: () => {
-                        if (window.confirm('Remove the repository "' + r.name + '"? What it installed stays installed.')) {
-                            act('/repo/remove', { name: r.name }, root);
-                        }
-                    },
-                })]),
+                el('td', {}, r.builtin
+                    ? [el('span', { className: 'meta', textContent: 'built in' })]
+                    : [el('button', {
+                        className: 'pill', textContent: 'Remove',
+                        onclick: () => {
+                            if (window.confirm('Remove the repository "' + r.name + '"? What it installed stays installed.')) {
+                                act('/repo/remove', { name: r.name }, root);
+                            }
+                        },
+                    })]),
             ]));
         });
         return table;

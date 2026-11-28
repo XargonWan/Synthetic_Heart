@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from core.extensions import cli
+from core.extensions.repo.config import Repository
 from tests.test_extensions_repo import Repo, make_source
 
 
@@ -147,35 +148,30 @@ class TestSafety:
         )
         assert run(tmp_path, "install", "dev/one==9.9")[0] == 1
 
-    def test_defaults_install_once_from_the_baked_in_repository(
-        self, tmp_path: Path
+    def test_defaults_install_once_from_the_official_repository(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        bundled = Repo(tmp_path / "bundled", tmp_path)
-        bundled.add("dev/core_ui")
-        bundled.publish(defaults=("dev/core_ui",))
-        lines: list[str] = []
-        code = cli.run(
-            [
-                "--root",
-                str(tmp_path / "runtime"),
-                "--bundled",
-                str(bundled.dir),
-                "defaults",
+        official = Repo(tmp_path / "official", tmp_path)
+        official.add("dev/core_ui")
+        official.publish(name="official", defaults=("dev/core_ui",))
+        monkeypatch.setattr(
+            "core.extensions.repo.config.builtin_repositories",
+            lambda: [
+                Repository(
+                    name="official",
+                    location=str(official.dir),
+                    kind="local",
+                    require_signature=False,
+                    trusted=True,
+                    builtin=True,
+                )
             ],
-            lines.append,
         )
+        lines: list[str] = []
+        code = cli.run(["--root", str(tmp_path / "runtime"), "defaults"], lines.append)
         assert code == 0 and lines == ["installed dev/core_ui"]
         lines.clear()
-        cli.run(
-            [
-                "--root",
-                str(tmp_path / "runtime"),
-                "--bundled",
-                str(bundled.dir),
-                "defaults",
-            ],
-            lines.append,
-        )
+        cli.run(["--root", str(tmp_path / "runtime"), "defaults"], lines.append)
         assert lines == ["nothing to do"]
 
 

@@ -21,7 +21,11 @@ First start and migration
    stay off.
 #. Matrix: stored ``matrix_chat/...`` paths, ``MATRIX_CHAT_*`` keys and the trainer id are
    renamed to ``matrix``; old room history still shows up.
-#. Rebuild the Docker image: the bundled extensions are installed offline at first start.
+#. Rebuild the Docker image. It carries no extension: the first start downloads the defaults
+   from the official repository, so it needs the network and a published release
+   (``latest-develop``).
+#. SearXNG is its own container now (``synth-searxng``); a stored ``SEARXNG_URL`` of
+   ``http://127.0.0.1:8888`` must be changed to ``http://synth-searxng:8080``.
 #. Zen: no endpoint is seeded by the Core; the Zen extension registers its own, and an
    installation with no endpoint at all shows the explicit "no cortex" message.
 

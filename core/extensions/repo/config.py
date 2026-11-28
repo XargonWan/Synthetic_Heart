@@ -63,6 +63,8 @@ class Repository:
     trusted: bool = False
     branch: str = ""
     token: str = ""
+    #: The official repository: always there, cannot be removed or edited, and never stored.
+    builtin: bool = False
 
 
 class RepoStore:
@@ -70,18 +72,30 @@ class RepoStore:
         self.path = path
 
     def load(self) -> list[Repository]:
+        """The official repository, then the ones the operator added."""
+        return sorted(
+            [*builtin_repositories(), *self._stored()],
+            key=lambda r: (r.priority, r.name),
+        )
+
+    def _stored(self) -> list[Repository]:
         raw = _read_json(self.path)
         found: list[Repository] = []
         for item in raw.get("repositories", []) if isinstance(raw, dict) else []:
             if isinstance(item, dict):
                 try:
-                    found.append(Repository(**item))
+                    repo = Repository(**item)
                 except TypeError:
                     continue
-        return sorted(found, key=lambda r: (r.priority, r.name))
+                if repo.name != OFFICIAL_NAME:  # a stale copy of the built-in one
+                    found.append(repo)
+        return found
 
     def save(self, repos: list[Repository]) -> None:
-        _write_json(self.path, {"repositories": [asdict(r) for r in repos]})
+        _write_json(
+            self.path,
+            {"repositories": [asdict(r) for r in repos if not r.builtin]},
+        )
 
     def add(self, repo: Repository) -> None:
         if not _NAME.match(repo.name):
@@ -97,6 +111,10 @@ class RepoStore:
         self.save(repos)
 
     def remove(self, name: str) -> bool:
+        if name == OFFICIAL_NAME:
+            raise ConfigError(
+                "the official repository is built in and cannot be removed"
+            )
         repos = self.load()
         kept = [r for r in repos if r.name != name]
         if len(kept) == len(repos):
@@ -108,6 +126,10 @@ class RepoStore:
         return next((r for r in self.load() if r.name == name), None)
 
     def update(self, name: str, **changes: Any) -> Repository:
+        if name == OFFICIAL_NAME:
+            raise ConfigError(
+                "the official repository is built in and cannot be edited"
+            )
         repos = self.load()
         for repo in repos:
             if repo.name == name:
@@ -143,16 +165,30 @@ OFFICIAL_KEY = "cRgFJxeqnbfGN+CPSeXhINTQr7z7SxNCdYtzrNObXGY="
 
 
 def official_repository() -> Repository:
-    """The official repository as a trusted, signed Git repository."""
+    """The official repository: trusted, signed with the pinned key, built in.
+
+    ``SYNTH_OFFICIAL_CHANNEL`` picks another rolling release (``latest`` for the ``main``
+    channel); the key and the address stay pinned."""
     return Repository(
         name=OFFICIAL_NAME,
         location=OFFICIAL_REPO,
         kind="github",
-        branch=OFFICIAL_CHANNEL,
+        branch=os.environ.get("SYNTH_OFFICIAL_CHANNEL", "").strip() or OFFICIAL_CHANNEL,
         public_key=OFFICIAL_KEY,
         require_signature=True,
         trusted=True,
+        builtin=True,
     )
+
+
+def builtin_repositories() -> list[Repository]:
+    """The repositories that are always there. A function, so tests can stand in for the
+    network (they never reach GitHub).
+
+    The image used to bake the default extensions in (``scripts/build_bundled_extensions.py``,
+    a local ``bundled`` repository). Removed in commit 805c5d53; find the files with
+    ``git log --diff-filter=D -- scripts/build_bundled_extensions.py``."""
+    return [official_repository()]
 
 
 @dataclass
@@ -165,8 +201,6 @@ class State:
     #: Whether the settings of the old in-tree plugins were carried over
     #: (``core.extensions.legacy``); it runs once.
     legacy_done: bool = False
-    #: Whether the official repository was added (once: removing it sticks).
-    official_seeded: bool = False
 
 
 class StateStore:
@@ -186,7 +220,6 @@ class StateStore:
                     continue
         state.defaults_done = bool(raw.get("defaults_done"))
         state.legacy_done = bool(raw.get("legacy_done"))
-        state.official_seeded = bool(raw.get("official_seeded"))
         state.declined = [d for d in raw.get("declined", []) if isinstance(d, str)]
         return state
 
@@ -199,7 +232,6 @@ class StateStore:
                 },
                 "defaults_done": state.defaults_done,
                 "legacy_done": state.legacy_done,
-                "official_seeded": state.official_seeded,
                 "declined": sorted(set(state.declined)),
             },
         )

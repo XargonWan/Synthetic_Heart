@@ -35,7 +35,6 @@ from core.extensions.repo.config import (
     Repository,
     StateStore,
     now,
-    official_repository,
 )
 from core.extensions.repo.index import (
     INDEX_NAME,
@@ -72,10 +71,6 @@ class InstallError(RuntimeError):
 
 class UntrustedRepository(InstallError):
     """The repository is not trusted and the operator has not confirmed."""
-
-
-#: Name of the repository baked into the image (see ``Installer.bundled``).
-BUNDLED_NAME = "bundled"
 
 
 @dataclass
@@ -134,7 +129,6 @@ class Installer:
         *,
         core_api_version: str = CORE_API_VERSION,
         transport_for: Callable[[Repository], Transport] | None = None,
-        bundled: Path | None = None,
         skins_dir: Path | None = None,
     ) -> None:
         self.root = Path(root)
@@ -145,9 +139,6 @@ class Installer:
         self.grants = FileGrantStore(self.root / "grants.json")
         self.core_api_version = core_api_version
         self._transport_for = transport_for or self._default_transport
-        #: A read-only repository baked into the image: first-start defaults install
-        #: from it with no network.
-        self.bundled = bundled
         self.cache = self.root / "cache"
 
     # -------------------------------------------------------------- layout
@@ -175,28 +166,6 @@ class Installer:
                 token=repo.token or github_token() or None,
             )
         return LocalTransport(Path(repo.location))
-
-    def _bundled_repo(self) -> Repository | None:
-        if self.bundled is None or not (self.bundled / INDEX_NAME).is_file():
-            return None
-        return Repository(
-            name=BUNDLED_NAME,
-            location=str(self.bundled),
-            kind="local",
-            priority=1000,
-            public_key=self._bundled_key(),
-            require_signature=bool(self._bundled_key()),
-            trusted=True,
-        )
-
-    def _bundled_key(self) -> str:
-        key_file = (self.bundled / "public.key") if self.bundled else None
-        try:
-            return (
-                key_file.read_text().strip() if key_file and key_file.is_file() else ""
-            )
-        except OSError:
-            return ""
 
     def load_index(
         self, repo: Repository, *, refresh: bool = False
@@ -236,9 +205,6 @@ class Installer:
 
     def _repositories(self, only: str | None = None) -> list[Repository]:
         repos = [r for r in self.repos.load() if r.enabled]
-        bundled = self._bundled_repo()
-        if bundled is not None:
-            repos.append(bundled)
         if only is not None:
             repos = [r for r in repos if r.name == only]
             if not repos:
@@ -751,21 +717,6 @@ class Installer:
 
     # ------------------------------------------------------------- defaults
 
-    def ensure_official_repository(self) -> bool:
-        """Add the official repository once. Returns whether it was added now.
-
-        Removing it afterwards sticks, and a repository the operator already named
-        ``official`` is never replaced."""
-        state = self.state.load()
-        if state.official_seeded:
-            return False
-        state.official_seeded = True
-        self.state.save(state)
-        if any(r.name == OFFICIAL_NAME for r in self.repos.load()):
-            return False
-        self.repos.add(official_repository())
-        return True
-
     def ensure_defaults(self) -> tuple[list[str], list[str]]:
         """Install the ``default_install`` extensions once, at the first start.
 
@@ -776,14 +727,19 @@ class Installer:
         state = self.state.load()
         if state.defaults_done:
             return [], []
-        candidates, _ = self.available()
+        candidates, problems = self.available()
         wanted = sorted({c.entry.id for c in candidates if c.entry.default_install})
         installed: list[str] = []
-        failed: list[str] = []
+        # The official repository could not be read (no network at the first start, or no
+        # release yet): that is a failure, reported, and the defaults are not done. The
+        # next start tries again.
+        failed: list[str] = [
+            p for p in problems if p.startswith(f"repository {OFFICIAL_NAME!r}")
+        ]
         trusted = {
             c.entry.id
             for c in candidates
-            if c.entry.default_install and c.repo.name in (BUNDLED_NAME, OFFICIAL_NAME)
+            if c.entry.default_install and c.repo.name == OFFICIAL_NAME
         }
         for ext_id in wanted:
             if ext_id in state.declined or ext_id in state.extensions:
@@ -792,7 +748,7 @@ class Installer:
                 self.install(ext_id, allow_untrusted=True)
                 installed.append(ext_id)
                 if ext_id in trusted:
-                    # The baked-in repository is the image's own: what it ships as a
+                    # The official repository is SyntH's own: what it ships as a
                     # default is on and granted what it declares, so the first start
                     # works. A default another repository merely *flags* is not.
                     self.grant(ext_id)
@@ -803,28 +759,6 @@ class Installer:
             state.defaults_done = True
             self.state.save(state)
         return installed, failed
-
-    def update_bundled(self) -> tuple[list[str], list[str]]:
-        """Bring what the image's own repository installed up to the versions it carries.
-
-        The image is how SyntH is updated: a new image has newer defaults than the ones in
-        an old ``/config`` volume. Only extensions installed *from the baked-in repository*
-        are touched (never one the operator took from another repository), they keep their
-        on/off state and grants, and a version that asks for more than was granted does not
-        get it: that stays for the operator to grant. Returns ``(updated, failed)``.
-        """
-        updated: list[str] = []
-        failed: list[str] = []
-        for ext_id, have, available in self.updates():
-            record = self.state.load().extensions.get(ext_id)
-            if record is None or record.repo != BUNDLED_NAME:
-                continue
-            try:
-                self.update(ext_id, allow_untrusted=True)
-                updated.append(f"{ext_id} {have} -> {available}")
-            except InstallError as exc:
-                failed.append(f"{ext_id}: {exc}")
-        return updated, failed
 
     def pinned_fingerprint(self, public_key: str) -> str:
         return key_fingerprint(public_key)

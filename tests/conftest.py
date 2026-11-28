@@ -163,3 +163,10 @@ def idle_eligible_target(monkeypatch):
         monkeypatch.setattr(plugin, "_collect_eligible_targets", fake_collect_targets)
 
     return _apply
+
+
+@pytest.fixture(autouse=True)
+def _no_official_repository_network(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The extension runtime's built-in official repository is a GitHub release: no test
+    reaches it. Tests that need it say so (tests/test_extensions_repo.py)."""
+    monkeypatch.setattr("core.extensions.repo.config.builtin_repositories", lambda: [])
