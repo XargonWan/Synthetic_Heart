@@ -7,6 +7,7 @@ import os
 from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 import pytest_asyncio
@@ -441,6 +442,75 @@ SEND_PHOTO = """
 """
 
 CAPS_MEDIA = (*CAPS,)
+
+
+def _send_voice(text: str, forwarded: str) -> str:
+    """An extension delivering a voice note, optionally captioned and/or forwarded."""
+    return f"""
+    async def main(ctx):
+        await ctx.interfaces.register("chat", display_name="Chat")
+        clip = ctx.inbox_path("note.ogg")
+        clip.write_bytes(b"OggS" + b"\\x00" * 32)
+        result = await ctx.interfaces.inbound(
+            "chat", "chat/room1", text={text!r}, sender_id="u1", sender_name="Alice",
+            is_voice_input=True, forwarded_from={forwarded},
+            attachments=[{{"path": str(clip), "filename": "note.ogg", "mime_type": "audio/ogg"}}],
+        )
+        await ctx.storage.set("result", result)
+        await ctx.stopping.wait()
+    """
+
+
+class TestForwardedAndSpokenMessages:
+    async def _deliver(
+        self,
+        mproc: tuple[Harness, MemoryInterfaceHost, MemoryMessaging, Path],
+        source: str,
+    ) -> Any:
+        h, _host, messaging, _sandbox = mproc
+        h.install("voice", source, caps=CAPS_MEDIA, interfaces=CHAT)
+        await h.supervisor.start("dev/voice")
+        await h.wait_for(lambda: h.stored("dev/voice", "result") is not None)
+        return messaging.enqueued[0]["message"]
+
+    @pytest.mark.asyncio
+    async def test_a_bare_voice_note_is_speech(
+        self, mproc: tuple[Harness, MemoryInterfaceHost, MemoryMessaging, Path]
+    ) -> None:
+        message = await self._deliver(mproc, _send_voice("", "None"))
+        assert getattr(message, "is_voice_input", False) is True
+        assert getattr(message, "forward_origin", None) is None
+
+    @pytest.mark.asyncio
+    async def test_a_captioned_voice_note_is_material_not_speech(
+        self, mproc: tuple[Harness, MemoryInterfaceHost, MemoryMessaging, Path]
+    ) -> None:
+        message = await self._deliver(mproc, _send_voice("transcribe this", "None"))
+        assert getattr(message, "is_voice_input", False) is False
+        assert message.attachments
+
+    @pytest.mark.asyncio
+    async def test_a_forward_from_someone_else_names_who_said_it(
+        self, mproc: tuple[Harness, MemoryInterfaceHost, MemoryMessaging, Path]
+    ) -> None:
+        forwarded = '{"sender_id": "u2", "sender_name": "Sara", "date": "2026-11-27T10:00:00+00:00"}'
+        message = await self._deliver(mproc, _send_voice("", forwarded))
+        assert getattr(message, "is_voice_input", False) is False
+        origin = message.forward_origin
+        assert (origin.sender_name, origin.sender_id, origin.is_sender) == (
+            "Sara",
+            "u2",
+            False,
+        )
+        assert origin.date is not None
+
+    @pytest.mark.asyncio
+    async def test_a_forward_of_the_users_own_message_says_so(
+        self, mproc: tuple[Harness, MemoryInterfaceHost, MemoryMessaging, Path]
+    ) -> None:
+        forwarded = '{"sender_id": "u1", "sender_name": "Alice"}'
+        message = await self._deliver(mproc, _send_voice("", forwarded))
+        assert message.forward_origin.is_sender is True
 
 
 class TestAttachmentsWithRealProcesses:

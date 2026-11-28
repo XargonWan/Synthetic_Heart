@@ -216,6 +216,7 @@ class Interfaces(_Namespace):
         sender_username: str | None = None,
         chat_username: str | None = None,
         reply_to: dict[str, Any] | None = None,
+        forwarded_from: dict[str, Any] | None = None,
         skip_mention_check: bool = False,
         is_explicit_trigger: bool = False,
         is_voice_input: bool = False,
@@ -234,7 +235,12 @@ class Interfaces(_Namespace):
         :meth:`Context.inbox_path`), each ``{"path", "filename", "mime_type"}``. The
         Core checks that every path is really inside your data directory, copies the
         file, and refuses the whole message otherwise. The files are yours to delete
-        as soon as this call returns."""
+        as soon as this call returns.
+
+        ``forwarded_from`` says who first said a forwarded message, for any kind of
+        message: ``{"sender_id", "sender_name", "date"}`` (all optional). The Core
+        tells the model it is not the user's own words, and a forwarded voice note is
+        never taken as the user speaking."""
         params: dict[str, Any] = {
             "interface_id": interface_id,
             "path": path,
@@ -260,6 +266,7 @@ class Interfaces(_Namespace):
             ("sender_username", sender_username),
             ("chat_username", chat_username),
             ("reply_to", reply_to),
+            ("forwarded_from", forwarded_from),
             ("human_count", human_count),
             ("attachments", attachments),
         ):

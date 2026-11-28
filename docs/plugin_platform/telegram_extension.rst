@@ -87,7 +87,13 @@ Core feature reached through Telegram objects.
        so the Core answers them with speech where the interface is declared
        ``voice_input_tts_only``. The old module's own live-API transcription path
        is not ported: transcription is whatever the Core does with an audio
-       attachment.
+       attachment. A voice note that is forwarded, or sent with a caption, is
+       material the user hands over, not speech: the Core drops the flag.
+   * - Forwarded messages (text, media or voice)
+     - Passed as ``forwarded_from`` (who first said it, and when). The Core tells the
+       model it is not the user's own words, and when the user forwards their own
+       earlier message, that it is not being said now. Same on the bot and the userbot,
+       and on any interface that sets ``forwarded_from``.
    * - Reply-to-media promotion (a reply to a photo carries that photo)
      - Not ported.
    * - Trainer direct messages while the chat sleeps

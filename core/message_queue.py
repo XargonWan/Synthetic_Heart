@@ -1897,6 +1897,8 @@ _CARRIED_TURN_FLAGS: tuple[str, ...] = (
     "request_tts",
     "is_voice_input",
     "interface_path",
+    # Who a forwarded message came from: a merged turn must not lose it.
+    "forward_origin",
     # A merged vessel player chat must stay a direct address to the SyntH.
     "_vessel_player_chat",
     "_no_compact",

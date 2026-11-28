@@ -209,6 +209,13 @@ toggling an interface. Trainer ids from ``TRAINER_IDS`` are kept across a restar
    other interface. Grant ``interfaces.inbound`` only to extensions you trust with
    that interface.
 
+An interface that can see a forward passes ``forwarded_from`` (``sender_id``,
+``sender_name`` and ``date``, all optional) for any kind of message. The Core puts it
+in the prompt as *who first said it* and flags whether it was the sender themselves
+(compared by ``sender_id``). A forwarded message, or a voice note sent together with
+text (a caption), is never taken as the user speaking: ``is_voice_input`` is dropped
+and the audio stays an attachment.
+
 Attachments
 ~~~~~~~~~~~
 

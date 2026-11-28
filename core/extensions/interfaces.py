@@ -946,6 +946,24 @@ def register_interface_api(gateway: Gateway, ports: InterfacePorts) -> Interface
                     }
                 }
 
+        forwarded_from = args["forwarded_from"]
+        forward_origin = None
+        if isinstance(forwarded_from, dict):
+            origin_id = _as_text(forwarded_from.get("sender_id"))
+            try:
+                origin_date = _parse_timestamp(forwarded_from.get("date"))
+            except RpcError:
+                origin_date = None  # a bad origin date must not drop the message
+            forward_origin = SimpleNamespace(
+                sender_id=origin_id,
+                sender_name=str(forwarded_from.get("sender_name") or "")[:MAX_NAME]
+                or None,
+                date=origin_date,
+                # Forwarded by the person who first said it: a message from their past,
+                # not something they are saying now.
+                is_sender=bool(origin_id) and origin_id == str(sender_id),
+            )
+
         sent_at = _parse_timestamp(args["timestamp"])
         attachments_in = None if args["backlog"] else args["attachments"]
         imported: list[dict[str, Any]] = []
@@ -1019,7 +1037,15 @@ def register_interface_api(gateway: Gateway, ports: InterfacePorts) -> Interface
             ]
         if args["is_explicit_trigger"]:
             wrapped.is_explicit_trigger = True
-        if args["is_voice_input"]:
+        if forward_origin is not None:
+            wrapped.forward_origin = forward_origin
+        # Spoken means the user is talking to the agent. A forwarded voice note, or one
+        # sent with a caption ("transcribe this"), is material the user hands over: its
+        # transcript is not their own speech, so the audio stays an attachment.
+        is_material = forward_origin is not None or bool(
+            text.strip() and (imported or args["attachments"])
+        )
+        if args["is_voice_input"] and not is_material:
             wrapped.is_voice_input = True
         if args["human_count"] is not None:
             wrapped.human_count = args["human_count"]
@@ -1201,6 +1227,13 @@ def register_interface_api(gateway: Gateway, ports: InterfacePorts) -> Interface
                 optional("sender_username", max_length=MAX_NAME),
                 optional("chat_username", max_length=MAX_NAME),
                 Param("reply_to", "object", required=False, default=None, max_length=8),
+                Param(
+                    "forwarded_from",
+                    "object",
+                    required=False,
+                    default=None,
+                    max_length=8,
+                ),
                 Param("skip_mention_check", "bool", required=False, default=False),
                 Param("is_explicit_trigger", "bool", required=False, default=False),
                 Param("is_voice_input", "bool", required=False, default=False),

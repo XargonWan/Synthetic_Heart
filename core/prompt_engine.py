@@ -2365,6 +2365,28 @@ def _assemble_prompt_request(  # noqa: PLR0913
                 f'[The user is replying to {_rq_sender}\'s message: "{_rq_safe}"]\n'
             )
 
+    # A forwarded message was said by someone, at some time: the model must not read
+    # it as the user speaking now. Built from the structural forward origin only.
+    _forward_prefix = ""
+    _fwd = prompt_dict.get("input", {}).get("payload", {}).get("forwarded_from")
+    if isinstance(_fwd, dict):
+        _fwd_when = (
+            f" (originally sent {_fwd['original_time']})"
+            if _fwd.get("original_time")
+            else ""
+        )
+        if _fwd.get("is_sender"):
+            _forward_prefix = (
+                f"[The user forwarded this from their own earlier messages{_fwd_when}: "
+                "it is not something they are saying now.]\n"
+            )
+        else:
+            _forward_prefix = (
+                f"[The user forwarded this message, originally from "
+                f"{_fwd.get('name') or 'unknown'}{_fwd_when}: it is not the user's "
+                "own words.]\n"
+            )
+
     # ── Attachments ─────────────────────────────────────────────────────────
     pr_attachments = _build_pr_attachments(image_data, attachments)
 
@@ -2445,7 +2467,7 @@ def _assemble_prompt_request(  # noqa: PLR0913
 
     _soul_user_prefix = f"{_soul_identity_prefix}{_soul_dsp_prefix}{_soul_delta}"
 
-    _combined_prefix = _soul_user_prefix + _reply_quote_prefix
+    _combined_prefix = _soul_user_prefix + _forward_prefix + _reply_quote_prefix
 
     return PromptRequest(
         system_instruction=system_instruction,
@@ -3263,6 +3285,16 @@ async def build_prompt_request(
                 f"{media_meta['type']}, {media_meta.get('duration', 0)}s"
             )
             break  # Only attach metadata for the first video
+
+    origin = getattr(message, "forward_origin", None)
+    if origin is not None:
+        origin_date = getattr(origin, "date", None)
+        input_payload["forwarded_from"] = {
+            "name": getattr(origin, "sender_name", None) or "unknown",
+            "id": getattr(origin, "sender_id", None),
+            "original_time": origin_date.isoformat() if origin_date else "",
+            "is_sender": bool(getattr(origin, "is_sender", False)),
+        }
 
     reply = getattr(message, "reply_to_message", None)
     if reply:

@@ -147,6 +147,11 @@ Interfaces
    hangs up the phone does **not** ring back. A spoken reply that reaches Telegram outside a
    call arrives as a **voice note** (ogg/opus), not as ``vox_*.wav``, on both (needs
    ``ffmpeg``). Calls through py-tgcalls were never run against a live Telegram call.
+   **Forwards**, on both: forward a text, a photo and a voice note from another person (the
+   reply names them and does not treat it as your words), forward your own old voice note
+   (it is understood as an earlier message, not said now), and send a voice note with the
+   caption "transcribe this" (the audio is material, not you speaking). Hidden-origin
+   forwards keep the name Telegram shows.
 #. **Fluxer** and the **OpenAI API server** (``/v1/models``, ``/v1/chat/completions``,
    ``/v1/completions``, SSE, the optional bearer key). No Ollama route answers any more.
 #. **Matrix** against a real homeserver: login by password and by token, room and thread

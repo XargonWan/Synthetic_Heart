@@ -45,6 +45,67 @@ def test_build_json_prompt_reply_without_text(monkeypatch):
     assert "MASTER INSTRUCTION" in pr.system_instruction
 
 
+def _forwarded_message(origin: SimpleNamespace) -> SimpleNamespace:
+    return SimpleNamespace(
+        chat_id=1,
+        text="here it is",
+        message_id=1,
+        from_user=SimpleNamespace(full_name="Jay", username="jay"),
+        date=datetime.now(timezone.utc),
+        reply_to_message=None,
+        forward_origin=origin,
+    )
+
+
+def test_forwarded_message_names_who_said_it(monkeypatch):
+    async def dummy_gather(message, ctx):
+        return {}
+
+    monkeypatch.setattr("core.action_parser.gather_static_injections", dummy_gather)
+    origin = SimpleNamespace(
+        sender_id="9",
+        sender_name="Sara",
+        date=datetime(2026, 11, 27, 10, 0, tzinfo=timezone.utc),
+        is_sender=False,
+    )
+    result = asyncio.run(
+        build_json_prompt(_forwarded_message(origin), {}, interface_name="telegram")
+    )
+    assert result["input"]["payload"]["forwarded_from"] == {
+        "name": "Sara",
+        "id": "9",
+        "original_time": "2026-11-27T10:00:00+00:00",
+        "is_sender": False,
+    }
+    assert "originally from Sara" in repr(result["__prompt_request"])
+
+
+def test_forward_of_the_users_own_message_is_not_said_now(monkeypatch):
+    async def dummy_gather(message, ctx):
+        return {}
+
+    monkeypatch.setattr("core.action_parser.gather_static_injections", dummy_gather)
+    origin = SimpleNamespace(
+        sender_id="1", sender_name="Jay", date=None, is_sender=True
+    )
+    result = asyncio.run(
+        build_json_prompt(_forwarded_message(origin), {}, interface_name="telegram")
+    )
+    assert result["input"]["payload"]["forwarded_from"]["is_sender"] is True
+    assert "from their own earlier messages" in repr(result["__prompt_request"])
+
+
+def test_message_without_forward_origin_has_no_forwarded_from(monkeypatch):
+    async def dummy_gather(message, ctx):
+        return {}
+
+    monkeypatch.setattr("core.action_parser.gather_static_injections", dummy_gather)
+    result = asyncio.run(
+        build_json_prompt(_forwarded_message(None), {}, interface_name="telegram")
+    )
+    assert "forwarded_from" not in result["input"]["payload"]
+
+
 def test_soul_dsp_profile_suppressed_on_vessel_turns(monkeypatch):
     """The standing "About the person you're talking to" profile must not leak
     into Rift Vessel turns — it is compiled from non-world chats and made
