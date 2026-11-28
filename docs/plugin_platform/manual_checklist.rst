@@ -99,6 +99,10 @@ Plugins, store and the WebUI
 #. Skins > Catalog (**new**): each skin shows its picture as the list icon and large in its
    details (a click zooms it), as the Skins tab does; **Miku** (whose preview is 4.3 MB in the
    package) shows as well as **Riko**; an installed skin keeps its picture.
+   The pictures come from the repository's signed index, so the release must be **built
+   again** with this Core first (Actions > publish > Run workflow on ``develop``, then Refresh):
+   a skin that is not installed shows the logo until the published ``synth-repo.json`` lists
+   ``<Skin>-preview.png`` for it. An installed skin shows its own package's picture at once.
 #. Install and Update show a progress bar with the percentage. A plugin with
    ``screenshots/`` shows them in the catalog before install (a click shows one large).
 #. An update is offered once and goes away after it is done (a bug offered it for ever).
